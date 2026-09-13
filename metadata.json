@@ -1,0 +1,8 @@
+{
+  "name": "Finova ",
+  "description": "Aplicación financiera móvil para control de inventario, balances, deudas e ingresos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

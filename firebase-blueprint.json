@@ -1,0 +1,142 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "System user representing a registered store / owner",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "description": "User email address" },
+        "name": { "type": "string", "description": "Full name or business name" },
+        "plan": { "type": "string", "enum": ["basic", "premium"], "description": "Subscription tier" },
+        "status": { "type": "string", "enum": ["active", "blocked"], "description": "User account status" },
+        "uid": { "type": "string", "description": "Firebase Auth UID of the user" },
+        "lastActive": { "type": "string", "format": "date-time", "description": "Last activity timestamp" },
+        "createdAt": { "type": "string", "description": "Account registration timestamp" },
+        "role": { "type": "string", "enum": ["admin", "user"], "description": "User access role" },
+        "isBanned": { "type": "boolean", "description": "Whether user is banned from application" },
+        "banReason": { "type": "string", "description": "Reason for account suspension or ban" }
+      },
+      "required": ["email", "name", "plan", "status", "uid"]
+    },
+    "FinancialRecord": {
+      "title": "FinancialRecord",
+      "description": "Financial income or expense transaction",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["ingreso", "egreso"] },
+        "amount": { "type": "number" },
+        "amountBs": { "type": "number" },
+        "exchangeRateUsed": { "type": "number" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "date": { "type": "string" },
+        "paymentMethod": { "type": "string" },
+        "currency": { "type": "string" }
+      },
+      "required": ["id", "type", "amount", "amountBs", "exchangeRateUsed", "description", "category", "date", "paymentMethod"]
+    },
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "An item in the store's stock catalog",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "stock": { "type": "number" },
+        "cost": { "type": "number" },
+        "price": { "type": "number" },
+        "status": { "type": "string", "enum": ["disponible", "no_disponible"] },
+        "iconColor": { "type": "string" },
+        "category": { "type": "string" }
+      },
+      "required": ["id", "name", "stock", "cost", "price", "status"]
+    },
+    "DebtPayment": {
+      "title": "DebtPayment",
+      "description": "Payment installment (abono) made toward a debt",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" },
+        "amount": { "type": "number" },
+        "amountBs": { "type": "number" },
+        "exchangeRateUsed": { "type": "number" },
+        "currency": { "type": "string", "enum": ["USD", "EUR"] },
+        "paymentMethod": { "type": "string" },
+        "reference": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "required": ["id", "date", "amount", "paymentMethod"]
+    },
+    "DebtItem": {
+      "title": "DebtItem",
+      "description": "A debt (debts register, collect/pay ledger, invoice and installment payments)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["por_cobrar", "por_pagar"] },
+        "debtorName": { "type": "string" },
+        "amount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "remainingAmount": { "type": "number" },
+        "amountBs": { "type": "number" },
+        "exchangeRateUsed": { "type": "number" },
+        "currency": { "type": "string", "enum": ["USD", "EUR"] },
+        "clientPhone": { "type": "string" },
+        "clientEmail": { "type": "string" },
+        "clientIdNumber": { "type": "string" },
+        "dueDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["pendiente", "pagado"] },
+        "description": { "type": "string" },
+        "dateCreated": { "type": "string" },
+        "paidAt": { "type": "string" }
+      },
+      "required": ["id", "type", "debtorName", "amount", "dueDate", "status", "description", "dateCreated"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "System audit trail record for user actions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "userEmail": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "category": { "type": "string", "enum": ["finanzas", "inventario", "deudas", "sistema", "tasas"] }
+      },
+      "required": ["id", "timestamp", "userEmail", "action", "details"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User system accounts and settings"
+    },
+    "/users/{userId}/records/{recordId}": {
+      "schema": { "$ref": "#/entities/FinancialRecord" },
+      "description": "Personalized cash flow entries"
+    },
+    "/users/{userId}/inventory/{itemId}": {
+      "schema": { "$ref": "#/entities/InventoryItem" },
+      "description": "Personalized catalog items"
+    },
+    "/users/{userId}/debts/{debtId}": {
+      "schema": { "$ref": "#/entities/DebtItem" },
+      "description": "Personalized accounts receivable and payable"
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Global activity logs tracker"
+    },
+    "/system/{configId}": {
+      "schema": {
+        "title": "SystemConfig",
+        "description": "Platform global configuration such as PRO feature flags",
+        "type": "object"
+      },
+      "description": "System feature toggles and platform settings"
+    }
+  }
+}
