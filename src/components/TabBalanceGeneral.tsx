@@ -8,7 +8,7 @@ import {
   Check as CheckIcon, Info as InfoIcon, BarChart2, Sparkles, Activity, Award
 } from 'lucide-react';
 import { FinancialRecord, InventoryItem, DebtItem, ExchangeRates } from '../types';
-import { formatMoney, CurrencyCode } from '../utils/currency';
+import { formatMoney, CurrencyCode, getRecordAmountInCurrency, convertAmount } from '../utils/currency';
 import { getDebtRemainingAmount } from '../utils/debtUtils';
 
 interface TabBalanceGeneralProps {
@@ -32,16 +32,27 @@ export default function TabBalanceGeneral({
   // Interactive state for projected chart view selection
   const [forecastMetric, setForecastMetric] = useState<'sales' | 'profits'>('sales');
 
-  // --- 1. CORE DATA CALCULATIONS (ALL STRICTLY IN REAL USD) ---
-  const totalIncoming = records.filter(r => r.type === 'ingreso').reduce((acc, curr) => acc + curr.amount, 0);
-  const totalOutgoing = records.filter(r => r.type === 'egreso').reduce((acc, curr) => acc + curr.amount, 0);
+  // --- 1. CORE DATA CALCULATIONS (RESPECTING MULTI-CURRENCY EQUILIBRIUM) ---
+  const bcvUsd = rates?.bcvUsd && rates.bcvUsd > 0 ? rates.bcvUsd : 832.49;
+  const bcvEur = rates?.bcvEur && rates.bcvEur > 0 ? rates.bcvEur : 968.07;
+
+  const totalIncoming = records.filter(r => r.type === 'ingreso').reduce((acc, curr) => acc + getRecordAmountInCurrency(curr, selectedCurrency, rates), 0);
+  const totalOutgoing = records.filter(r => r.type === 'egreso').reduce((acc, curr) => acc + getRecordAmountInCurrency(curr, selectedCurrency, rates), 0);
   const liquidCashUSD = totalIncoming - totalOutgoing;
 
-  // Valuation of stock in warehouse (Cost of acquisition)
-  const inventoryCostUSD = inventory.reduce((sum, item) => sum + (item.cost * (item.stock || 0)), 0);
+  // Valuation of stock in warehouse (Cost of acquisition) supporting mixed currencies (USD, EUR, VES)
+  const inventoryCostUSD = inventory.reduce((sum, item) => {
+    const costCur = item.costCurrency || item.currency || 'USD';
+    const unitCostInSelected = convertAmount(item.cost || 0, costCur, selectedCurrency, rates);
+    return sum + (unitCostInSelected * (item.stock || 0));
+  }, 0);
   
-  // Estimated sales revenue from stock
-  const inventorySaleUSD = inventory.reduce((sum, item) => sum + (item.price * (item.stock || 0)), 0);
+  // Estimated sales revenue from stock supporting mixed currencies (USD, EUR, VES)
+  const inventorySaleUSD = inventory.reduce((sum, item) => {
+    const priceCur = item.priceCurrency || item.currency || 'USD';
+    const unitPriceInSelected = convertAmount(item.price || 0, priceCur, selectedCurrency, rates);
+    return sum + (unitPriceInSelected * (item.stock || 0));
+  }, 0);
   const expectedProfitUSD = inventorySaleUSD - inventoryCostUSD;
 
   // Accounts receivable from clients (unpaid remaining balance)
@@ -92,10 +103,11 @@ export default function TabBalanceGeneral({
     if (!acc[method]) {
       acc[method] = { incoming: 0, outgoing: 0 };
     }
+    const amt = getRecordAmountInCurrency(curr, selectedCurrency, rates);
     if (curr.type === 'ingreso') {
-      acc[method].incoming += curr.amount;
+      acc[method].incoming += amt;
     } else {
-      acc[method].outgoing += curr.amount;
+      acc[method].outgoing += amt;
     }
     return acc;
   }, {});

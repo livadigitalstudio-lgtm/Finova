@@ -7,7 +7,7 @@ import {
   Pencil, Sparkles, AlertCircle
 } from 'lucide-react';
 import { InventoryItem, ExchangeRates, FinancialRecord, SoldItemDetail, DebtItem } from '../types';
-import { formatMoney, CurrencyCode } from '../utils/currency';
+import { formatMoney, CurrencyCode, convertAmount } from '../utils/currency';
 import { getLocalDateString } from '../utils/dateUtils';
 import { storageService } from '../services/storageService';
 import { 
@@ -95,6 +95,35 @@ export function SaleFlowModal({
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all'); // 'all', 'low_stock', or custom category
   const [sortOrder, setSortOrder] = useState<'name' | 'price_asc' | 'price_desc' | 'stock'>('name');
 
+  // Multi-currency switch handler that preserves financial equilibrium
+  const handleSwitchCurrency = (target: 'USD' | 'EUR') => {
+    if (target === currency) return;
+
+    const factor = target === 'EUR' 
+      ? (officialRateUSD / officialRateEUR) 
+      : (officialRateEUR / officialRateUSD);
+
+    setCustomUnitPrices(prev => {
+      const updated: Record<string, number> = {};
+      for (const [prodId, p] of Object.entries(prev)) {
+        updated[prodId] = Number(((Number(p) || 0) * factor).toFixed(2));
+      }
+      return updated;
+    });
+
+    if (freeSaleAmount) {
+      const currentAmt = parseFloat(freeSaleAmount);
+      if (!isNaN(currentAmt) && currentAmt > 0) {
+        setFreeSaleAmount((currentAmt * factor).toFixed(2));
+      }
+    }
+
+    setCurrency(target);
+    if (target === 'EUR' && rateType === 'paralelo') {
+      setRateType('bcv');
+    }
+  };
+
   // Step 3 / Free sale fields
   const [saleType, setSaleType] = useState<'pagado' | 'deuda'>('pagado');
   const [isMultiCurrencyActive, setIsMultiCurrencyActive] = useState(true);
@@ -134,6 +163,7 @@ export function SaleFlowModal({
   const [newProdCost, setNewProdCost] = useState('');
   const [newProdPrice, setNewProdPrice] = useState('');
   const [newProdStock, setNewProdStock] = useState('1');
+  const [newProdCurrency, setNewProdCurrency] = useState<'USD' | 'EUR'>('USD');
 
   // New client form state
   const [newClientName, setNewClientName] = useState('');
@@ -207,6 +237,8 @@ export function SaleFlowModal({
       if (preSelectedProductId) {
         const target = inventory.find(p => p.id === preSelectedProductId);
         if (target) {
+          const targetCurrency = target.currency || 'USD';
+          setCurrency(targetCurrency);
           setSelectedQuantities({ [target.id]: 1 });
           setCustomUnitPrices({ [target.id]: target.price });
           setIsFreeSale(false);
@@ -232,9 +264,11 @@ export function SaleFlowModal({
       if (qty > 0) {
         const prod = inventory.find(p => p.id === prodId);
         if (prod) {
+          const prodPriceCur = prod.priceCurrency || prod.currency || 'USD';
           let defaultUnitPrice = prod.price;
-          if (currency === 'EUR' && officialRateUSD > 0 && officialRateEUR > 0) {
-            defaultUnitPrice = parseFloat((prod.price * (officialRateUSD / officialRateEUR)).toFixed(2));
+          // If the product price currency doesn't match the active sale currency, normalize with equilibrium
+          if (prodPriceCur !== currency) {
+            defaultUnitPrice = parseFloat(convertAmount(prod.price, prodPriceCur, currency, rates).toFixed(2));
           }
           const unitPrice = typeof customUnitPrices[prodId] === 'number' 
             ? customUnitPrices[prodId] 
@@ -244,7 +278,7 @@ export function SaleFlowModal({
       }
     }
     return list;
-  }, [selectedQuantities, customUnitPrices, inventory, currency, officialRateUSD, officialRateEUR]);
+  }, [selectedQuantities, customUnitPrices, inventory, currency, rates]);
 
   // Total units selected
   const totalUnits = useMemo(() => {
@@ -302,6 +336,14 @@ export function SaleFlowModal({
   // Stepper handlers in Step 1
   const handleIncreaseQty = (prod: InventoryItem) => {
     const current = selectedQuantities[prod.id] || 0;
+    // If no products are selected yet, lock sale currency to this product's configured price currency
+    const totalSelected = (Object.values(selectedQuantities) as number[]).reduce((a, b) => a + (Number(b) || 0), 0);
+    if (totalSelected === 0) {
+      const pCur = prod.priceCurrency || prod.currency;
+      if (pCur === 'EUR' || pCur === 'USD') {
+        setCurrency(pCur);
+      }
+    }
     setSelectedQuantities(prev => ({
       ...prev,
       [prod.id]: current + 1
@@ -384,12 +426,15 @@ export function SaleFlowModal({
       return;
     }
 
-    // Build sold items detail
+    // Build sold items detail with exact cost & price currencies for auditability
     const soldItems: SoldItemDetail[] = isFreeSale ? [] : selectedItemsList.map(s => ({
       productId: s.item.id,
       name: s.item.name,
       quantity: s.quantity,
-      unitPrice: s.unitPrice
+      unitPrice: s.unitPrice,
+      unitCost: s.item.cost,
+      costCurrency: s.item.costCurrency || s.item.currency || 'USD',
+      priceCurrency: s.item.priceCurrency || s.item.currency || 'USD'
     }));
 
     // Build description
@@ -417,15 +462,20 @@ export function SaleFlowModal({
 
     // If paid -> create FinancialRecord
     if (saleType === 'pagado') {
+      let finalPaymentMethod = paymentMethod || 'Efectivo';
+      if (finalPaymentMethod === 'Efectivo' || finalPaymentMethod === 'Efectivo USD' || finalPaymentMethod === 'Efectivo EUR') {
+        finalPaymentMethod = currency === 'EUR' ? 'Efectivo EUR' : 'Efectivo USD';
+      }
+
       const recordPayload: Omit<FinancialRecord, 'id'> = {
         type: 'ingreso',
         amount: finalTotal,
-        amountBs: totalInBs,
+        amountBs: Number(totalInBs.toFixed(2)),
         exchangeRateUsed: currentRate,
         description: descriptionText,
         category: finalCategory,
         date: saleDate,
-        paymentMethod: paymentMethod || 'Efectivo',
+        paymentMethod: finalPaymentMethod,
         currency,
         soldItems
       };
@@ -490,15 +540,20 @@ export function SaleFlowModal({
       stock: stockNum,
       cost: costNum,
       price: priceNum,
+      costCurrency: newProdCurrency,
+      priceCurrency: newProdCurrency,
+      currency: newProdCurrency,
       status: stockNum > 0 ? 'disponible' : 'no_disponible',
       category: finalCat || undefined
     });
 
+    setCurrency(newProdCurrency);
     setNewProdName('');
     setNewProdCategory('');
     setNewProdCost('');
     setNewProdPrice('');
     setNewProdStock('1');
+    setNewProdCurrency('USD');
     setIsQuickProductModalOpen(false);
   };
 
@@ -598,40 +653,6 @@ export function SaleFlowModal({
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
-              {/* Currency selector header */}
-              <div className="bg-white p-3 rounded-2xl border border-slate-200/80 flex items-center justify-between shadow-2xs">
-                <div className="flex items-center gap-2">
-                  <Banknote className="w-4 h-4 text-emerald-600" />
-                  <span className="text-xs font-bold text-slate-700">Moneda de la venta:</span>
-                </div>
-                <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-xl">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCurrency('USD');
-                      if (rateType === 'custom' && !customRateInput) setRateType('bcv');
-                    }}
-                    className={`px-3 py-1 rounded-lg text-xs font-black transition-all cursor-pointer ${
-                      currency === 'USD' ? 'bg-white text-emerald-800 shadow-xs' : 'text-slate-500 hover:text-slate-800'
-                    }`}
-                  >
-                    $ Dólar (USD)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCurrency('EUR');
-                      if (rateType === 'paralelo') setRateType('bcv');
-                    }}
-                    className={`px-3 py-1 rounded-lg text-xs font-black transition-all cursor-pointer ${
-                      currency === 'EUR' ? 'bg-white text-blue-800 shadow-xs' : 'text-slate-500 hover:text-slate-800'
-                    }`}
-                  >
-                    € Euro (EUR)
-                  </button>
-                </div>
-              </div>
-
               <div>
                 <h3 className="text-lg font-black text-slate-900 tracking-tight">
                   ¿Qué tipo de venta deseas registrar?
@@ -767,6 +788,18 @@ export function SaleFlowModal({
 
             {/* Sub-header controls */}
             <div className="p-4 bg-white border-b border-slate-100 space-y-3 shrink-0">
+              {/* Rate info banner */}
+              <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-2.5 flex items-center justify-between shadow-2xs">
+                <div className="flex items-center gap-2">
+                  <Banknote className="w-4 h-4 text-emerald-600" />
+                  <span className="text-xs font-bold text-slate-700">Tasas oficiales BCV:</span>
+                  <div className="flex items-center gap-2 text-[11px] font-mono font-bold text-slate-600">
+                    <span className="bg-white px-2 py-0.5 rounded-lg border border-slate-200">USD: Bs. {officialRateUSD.toFixed(2)}</span>
+                    <span className="bg-white px-2 py-0.5 rounded-lg border border-slate-200">EUR: Bs. {officialRateEUR.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+
               {/* Search input (if open) */}
               {searchQuery !== '' && (
                 <div className="relative">
@@ -920,8 +953,13 @@ export function SaleFlowModal({
                             {prod.name}
                           </h4>
                           
-                          {/* Stock badge */}
-                          <div className="mt-0.5">
+                          {/* Stock and currency badge */}
+                          <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
+                            <span className={`inline-block font-extrabold text-[9px] px-1.5 py-0.5 rounded-md ${
+                              prod.currency === 'EUR' ? 'bg-blue-100 text-blue-800' : 'bg-emerald-100 text-emerald-800'
+                            }`}>
+                              {prod.currency === 'EUR' ? '€ EUR' : '$ USD'}
+                            </span>
                             {isOut ? (
                               <span className="inline-block bg-rose-50 border border-rose-200 text-rose-600 font-extrabold text-[10px] px-2 py-0.5 rounded-md">
                                 No disponible
@@ -937,10 +975,23 @@ export function SaleFlowModal({
                             )}
                           </div>
 
-                          {/* Price */}
-                          <div className="text-xs sm:text-sm font-black text-slate-900 mt-1 font-mono">
-                            ${prod.price.toFixed(2)}
-                          </div>
+                          {/* Price in product's native currency */}
+                          {(() => {
+                            const prodCur = prod.currency || 'USD';
+                            const prodSym = prodCur === 'EUR' ? '€' : '$';
+                            const prodRate = prodCur === 'EUR' ? officialRateEUR : officialRateUSD;
+                            const bsVal = prod.price * prodRate;
+                            return (
+                              <div className="text-xs sm:text-sm font-black text-slate-900 mt-1 font-mono flex items-baseline gap-1.5 flex-wrap">
+                                <span>
+                                  {prodSym}{prod.price.toFixed(2)} <span className="text-[10px] text-slate-500 font-bold">{prodCur}</span>
+                                </span>
+                                <span className="text-[10px] text-slate-400 font-normal">
+                                  ≈ Bs. {bsVal.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
 
@@ -996,7 +1047,7 @@ export function SaleFlowModal({
                   <span>Añadir productos</span>
                 </div>
                 <div className="flex items-center gap-1.5 font-mono font-black">
-                  <span>${subtotal.toFixed(2)}</span>
+                  <span>{currency === 'USD' ? '$' : '€'}{subtotal.toFixed(2)}</span>
                   <ChevronRight className="w-4 h-4" />
                 </div>
               </button>
@@ -1021,6 +1072,21 @@ export function SaleFlowModal({
                   <ArrowLeft className="w-5 h-5 stroke-[2.5]" />
                 </button>
                 <h2 className="text-base font-extrabold tracking-tight">Confirma precios y cantidades</h2>
+              </div>
+            </div>
+
+            {/* Currency info bar */}
+            <div className="bg-slate-50 border-b border-slate-200/80 px-4 py-2 flex items-center justify-between text-xs shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-bold text-slate-500">Moneda de venta:</span>
+                <span className={`px-2 py-0.5 rounded-md text-[11px] font-black ${
+                  currency === 'EUR' ? 'bg-blue-100 text-blue-800' : 'bg-emerald-100 text-emerald-800'
+                }`}>
+                  {currency === 'EUR' ? '€ Euro (EUR)' : '$ Dólar (USD)'}
+                </span>
+              </div>
+              <div className="text-[11px] font-mono text-slate-500 font-semibold">
+                Tasa: Bs. {activeRate.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </div>
             </div>
 
@@ -1093,7 +1159,7 @@ export function SaleFlowModal({
                         </label>
                         <div className="relative">
                           <span className="absolute left-3 top-2.5 font-bold font-mono text-slate-400 text-xs">
-                            $
+                            {currency === 'USD' ? '$' : '€'}
                           </span>
                           <input
                             type="number"
@@ -1108,11 +1174,16 @@ export function SaleFlowModal({
                     </div>
 
                     {/* Subtext info */}
-                    <div className="text-[11px] font-bold text-slate-400 font-mono pt-1">
-                      Precio por {quantity} {quantity === 1 ? 'unidad' : 'unidades'}:{' '}
-                      <span className="text-slate-800 font-black">
-                        ${(unitPrice * quantity).toFixed(2)}
-                      </span>
+                    <div className="text-[11px] font-bold text-slate-400 font-mono pt-1 flex items-baseline justify-between">
+                      <div>
+                        Precio por {quantity} {quantity === 1 ? 'unidad' : 'unidades'}:{' '}
+                        <span className="text-slate-800 font-black">
+                          {currency === 'USD' ? '$' : '€'}{(unitPrice * quantity).toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 font-semibold">
+                        Bs. {((unitPrice * quantity) * activeRate).toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -1133,7 +1204,7 @@ export function SaleFlowModal({
                   <span>Confirmar</span>
                 </div>
                 <div className="flex items-center gap-1.5 font-mono font-black">
-                  <span>${subtotal.toFixed(2)}</span>
+                  <span>{currency === 'USD' ? '$' : '€'}{subtotal.toFixed(2)}</span>
                   <ChevronRight className="w-4 h-4" />
                 </div>
               </button>
@@ -1228,48 +1299,15 @@ export function SaleFlowModal({
 
                 {isMultiCurrencyActive && (
                   <div className="pt-2 border-t border-slate-100 space-y-2.5">
-                    {/* Currency Selector Pills ($ vs €) */}
-                    <div>
-                      <label className="block text-[10px] font-extrabold uppercase tracking-wider text-slate-400 mb-1.5">
-                        Cobrar en:
-                      </label>
-                      <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100/90 rounded-xl">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setCurrency('USD');
-                            if (rateType === 'custom' && !customRateInput) setRateType('bcv');
-                          }}
-                          className={`py-2 px-3 rounded-lg font-black text-xs flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                            currency === 'USD'
-                              ? 'bg-white text-slate-900 shadow-xs border border-slate-200/80'
-                              : 'text-slate-600 hover:text-slate-900'
-                          }`}
-                        >
-                          <span className="w-5 h-5 rounded-md bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-xs">
-                            $
-                          </span>
-                          <span>Dólar ($ USD)</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setCurrency('EUR');
-                            if (rateType === 'paralelo') setRateType('bcv');
-                          }}
-                          className={`py-2 px-3 rounded-lg font-black text-xs flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                            currency === 'EUR'
-                              ? 'bg-white text-slate-900 shadow-xs border border-slate-200/80'
-                              : 'text-slate-600 hover:text-slate-900'
-                          }`}
-                        >
-                          <span className="w-5 h-5 rounded-md bg-blue-100 text-blue-800 flex items-center justify-center font-black text-xs">
-                            €
-                          </span>
-                          <span>Euro (€ EUR)</span>
-                        </button>
-                      </div>
+                    {/* Moneda configurada por el producto */}
+                    <div className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200/80 rounded-xl">
+                      <span className="text-xs font-bold text-slate-600">Moneda de la venta:</span>
+                      <span className={`px-2.5 py-1 rounded-lg font-black text-xs inline-flex items-center gap-1.5 ${
+                        currency === 'EUR' ? 'bg-blue-100 text-blue-800 border border-blue-200' : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                      }`}>
+                        <span>{currency === 'EUR' ? '€' : '$'}</span>
+                        <span>{currency === 'EUR' ? 'Euro (EUR)' : 'Dólar (USD)'}</span>
+                      </span>
                     </div>
 
                     {/* Rate Selector Pills */}
@@ -1419,7 +1457,7 @@ export function SaleFlowModal({
                           Productos en la venta ({totalUnits})
                         </span>
                         <p className="text-[10px] text-slate-400">
-                          Subtotal: ${subtotal.toFixed(2)}
+                          Subtotal: {currency === 'EUR' ? '€' : '$'}{subtotal.toFixed(2)}
                         </p>
                       </div>
                     </div>
@@ -1441,7 +1479,7 @@ export function SaleFlowModal({
                           <span className="font-semibold text-slate-800 truncate">{item.name}</span>
                         </div>
                         <span className="font-mono font-bold text-slate-900 shrink-0">
-                          ${(unitPrice * quantity).toFixed(2)}
+                          {currency === 'EUR' ? '€' : '$'}{(unitPrice * quantity).toFixed(2)}
                         </span>
                       </div>
                     ))}
@@ -1516,7 +1554,9 @@ export function SaleFlowModal({
                         >
                           <IconComp className={`w-5 h-5 ${isSelected ? 'text-emerald-600' : 'text-slate-500'}`} />
                           <span className="text-[10.5px] font-bold leading-tight">
-                            {method.name}
+                            {method.id === 'Efectivo'
+                              ? (currency === 'EUR' ? 'Efectivo (€)' : 'Efectivo ($)')
+                              : method.name}
                           </span>
                         </button>
                       );
@@ -1785,10 +1825,40 @@ export function SaleFlowModal({
                   </div>
                 </div>
 
+                <div>
+                  <label className="block text-[9px] font-extrabold tracking-wider uppercase text-slate-500 mb-1">
+                    Moneda del producto <span className="text-rose-500">*</span>
+                  </label>
+                  <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => setNewProdCurrency('USD')}
+                      className={`py-1.5 px-3 rounded-lg font-black text-xs transition-all cursor-pointer ${
+                        newProdCurrency === 'USD'
+                          ? 'bg-white text-emerald-800 shadow-xs'
+                          : 'text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      $ Dólar (USD)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewProdCurrency('EUR')}
+                      className={`py-1.5 px-3 rounded-lg font-black text-xs transition-all cursor-pointer ${
+                        newProdCurrency === 'EUR'
+                          ? 'bg-white text-blue-800 shadow-xs'
+                          : 'text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      € Euro (EUR)
+                    </button>
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-[9px] font-extrabold tracking-wider uppercase text-slate-500 mb-1">
-                      Costo ($)
+                      Costo ({newProdCurrency === 'EUR' ? '€' : '$'})
                     </label>
                     <input
                       type="number"
@@ -1803,7 +1873,7 @@ export function SaleFlowModal({
 
                   <div>
                     <label className="block text-[9px] font-extrabold tracking-wider uppercase text-slate-500 mb-1">
-                      Precio de venta ($) <span className="text-rose-500">*</span>
+                      Precio de venta ({newProdCurrency === 'EUR' ? '€' : '$'}) <span className="text-rose-500">*</span>
                     </label>
                     <input
                       type="number"

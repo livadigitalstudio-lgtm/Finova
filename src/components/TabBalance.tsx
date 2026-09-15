@@ -3,11 +3,12 @@ import {
   Calendar, Filter, ArrowUpRight, ArrowDownRight, 
   Trash2, FileText, Download, TrendingUp, Search, 
   ChevronLeft, ChevronRight, X, Plus, Minus, Check, 
-  Clock, DollarSign, Wallet, CalendarDays, RefreshCw, Package
+  Clock, DollarSign, Wallet, CalendarDays, RefreshCw, Package,
+  AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { FinancialRecord, ExchangeRates } from '../types';
-import { formatMoney, CurrencyCode } from '../utils/currency';
+import { FinancialRecord, ExchangeRates, InventoryItem } from '../types';
+import { formatMoney, CurrencyCode, formatRecordDisplay, getRecordAmountInCurrency } from '../utils/currency';
 import { 
   getLocalDateString, 
   parseDateSafe, 
@@ -19,7 +20,8 @@ import {
 
 interface TabBalanceProps {
   records: FinancialRecord[];
-  onDeleteRecord: (id: string) => void;
+  inventory?: InventoryItem[];
+  onDeleteRecord: (id: string, options?: { revertInventory?: boolean }) => void;
   onOpenSale: () => void;
   onOpenExpense: () => void;
   rates: ExchangeRates;
@@ -29,6 +31,7 @@ interface TabBalanceProps {
 
 export default function TabBalance({
   records = [],
+  inventory = [],
   onDeleteRecord,
   onOpenSale,
   onOpenExpense,
@@ -51,11 +54,15 @@ export default function TabBalance({
     return Math.min(5, Math.ceil(currentDay / 7));
   });
   const [periodMode, setPeriodMode] = useState<'diario' | 'semanal' | 'mensual' | 'anual'>('diario');
-  const [balanceSubTab, setBalanceSubTab] = useState<'ingreso' | 'egreso'>('ingreso');
+  const [balanceSubTab, setBalanceSubTab] = useState<'todos' | 'ingreso' | 'egreso'>('todos');
   const [showPeriodModal, setShowPeriodModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [notification, setNotification] = useState<string | null>(null);
+
+  // Deletion modal state
+  const [recordToDelete, setRecordToDelete] = useState<FinancialRecord | null>(null);
+  const [revertStockOnDelete, setRevertStockOnDelete] = useState<boolean>(true);
 
   // Years available for historical audits (past 4 years, current, next, plus any year from records)
   const availableYears = useMemo(() => {
@@ -266,7 +273,7 @@ export default function TabBalance({
     let ing = 0;
     let eg = 0;
     filteredRecords.forEach(r => {
-      const amt = Number(r.amount) || 0;
+      const amt = getRecordAmountInCurrency(r, selectedCurrency, rates);
       if (r.type === 'ingreso') ing += amt;
       else if (r.type === 'egreso') eg += amt;
     });
@@ -275,7 +282,7 @@ export default function TabBalance({
       totalEgreso: eg,
       netBalance: ing - eg
     };
-  }, [filteredRecords]);
+  }, [filteredRecords, selectedCurrency, rates]);
 
   const netMoney = useMemo(() => formatMoney(netBalance, selectedCurrency, rates), [netBalance, selectedCurrency, rates]);
   const ingresoMoney = useMemo(() => formatMoney(totalIngreso, selectedCurrency, rates), [totalIngreso, selectedCurrency, rates]);
@@ -283,6 +290,7 @@ export default function TabBalance({
 
   // Active sub-tab records
   const tabRecords = useMemo(() => {
+    if (balanceSubTab === 'todos') return filteredRecords;
     return filteredRecords.filter(r => r.type === balanceSubTab);
   }, [filteredRecords, balanceSubTab]);
 
@@ -690,8 +698,25 @@ export default function TabBalance({
         </div>
       </div>
 
-      {/* 3. SUBTABS: "Ingresos" | "Egresos" */}
+      {/* 3. SUBTABS: "Todos" | "Ingresos" | "Egresos" */}
       <div className="flex bg-slate-100 p-1 rounded-2xl border border-slate-200/60 relative">
+        <button
+          type="button"
+          onClick={() => setBalanceSubTab('todos')}
+          className={`flex-1 py-2.5 rounded-xl text-xs font-extrabold transition-all cursor-pointer relative z-10 ${
+            balanceSubTab === 'todos' ? 'text-slate-900' : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          Todos ({filteredRecords.length})
+          {balanceSubTab === 'todos' && (
+            <motion.div
+              layoutId="balanceTabIndicator"
+              className="absolute inset-0 bg-white rounded-xl shadow-xs -z-10"
+              transition={{ type: 'spring', stiffness: 450, damping: 35 }}
+            />
+          )}
+        </button>
+
         <button
           type="button"
           onClick={() => setBalanceSubTab('ingreso')}
@@ -830,6 +855,14 @@ export default function TabBalance({
                         </span>
                       </div>
                     )}
+                    {rec.purchasedItems && rec.purchasedItems.length > 0 && (
+                      <div className="flex items-center gap-1 my-0.5 flex-wrap">
+                        <span className="inline-flex items-center gap-1 text-[9.5px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/70 px-1.5 py-0.2 rounded-md">
+                          <Package className="w-2.5 h-2.5 text-emerald-600" />
+                          <span>Entrada a inventario: {rec.purchasedItems.map(pi => `${pi.quantity}x ${pi.name}`).join(', ')}</span>
+                        </span>
+                      </div>
+                    )}
                     <div className="flex items-center gap-1.5 text-[10.5px] text-slate-400 mt-0.5 flex-wrap">
                       <span className="font-semibold text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded-md uppercase text-[9.5px]">
                         {rec.paymentMethod}
@@ -845,17 +878,22 @@ export default function TabBalance({
                 <div className="text-right shrink-0 flex items-center gap-3">
                   <div>
                     {(() => {
-                      const rMoney = formatMoney(rec.amount, selectedCurrency, rates);
+                      const disp = formatRecordDisplay(rec, selectedCurrency, rates);
                       return (
                         <>
                           <div className={`text-sm sm:text-base font-black font-sans ${
                             isIngreso ? 'text-emerald-600' : 'text-rose-600'
                           }`}>
-                            {isIngreso ? '+' : '-'}{rMoney.primary}
+                            {disp.originalText}
                           </div>
                           <div className="text-[10px] font-mono text-slate-400 font-semibold">
-                            {rMoney.bolivares}
+                            {disp.bolivares}
                           </div>
+                          {disp.equilibriumNotice && (
+                            <div className="text-[9px] font-mono font-bold text-slate-500 mt-0.5">
+                              {disp.equilibriumNotice}
+                            </div>
+                          )}
                         </>
                       );
                     })()}
@@ -863,9 +901,13 @@ export default function TabBalance({
 
                   <button
                     type="button"
-                    onClick={() => onDeleteRecord(rec.id)}
-                    className="opacity-0 group-hover:opacity-100 p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all cursor-pointer"
-                    title="Eliminar movimiento"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRecordToDelete(rec);
+                      setRevertStockOnDelete(true);
+                    }}
+                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 active:bg-rose-100 rounded-xl transition-all cursor-pointer flex items-center justify-center shrink-0"
+                    title={rec.type === 'egreso' ? 'Eliminar compra o egreso' : 'Eliminar venta o ingreso'}
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -1144,6 +1186,178 @@ export default function TabBalance({
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* MODAL: Confirmar eliminación de movimiento con reversión de inventario */}
+      {recordToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="bg-white rounded-3xl w-full max-w-md p-5 sm:p-6 space-y-4 shadow-2xl border border-slate-200 overflow-hidden"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-black text-slate-900 leading-snug">
+                    {recordToDelete.type === 'egreso' ? '¿Eliminar esta compra o egreso?' : '¿Eliminar este ingreso o venta?'}
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-medium">
+                    {recordToDelete.type === 'egreso'
+                      ? 'Revertirá el movimiento contable y ajustará el inventario'
+                      : 'Revertirá el ingreso y repondrá las existencias vendidas'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRecordToDelete(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition-all cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Resumen del movimiento */}
+            <div className="bg-slate-50 rounded-2xl p-3.5 border border-slate-200/80 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-800 line-clamp-1">
+                  {recordToDelete.description}
+                </span>
+                <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-md ${
+                  recordToDelete.type === 'egreso' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'
+                }`}>
+                  {recordToDelete.type === 'egreso' ? 'Egreso / Compra' : 'Ingreso / Venta'}
+                </span>
+              </div>
+
+              <div className="flex items-baseline justify-between border-t border-slate-200/60 pt-2">
+                <span className="text-[11px] text-slate-500 font-medium">Monto registrado:</span>
+                <div className="text-right">
+                  <span className={`text-base font-black font-sans ${
+                    recordToDelete.type === 'egreso' ? 'text-rose-600' : 'text-emerald-600'
+                  }`}>
+                    {formatRecordDisplay(recordToDelete, selectedCurrency, rates).originalText}
+                  </span>
+                  <span className="block text-[10px] font-mono text-slate-400 font-semibold">
+                    {formatRecordDisplay(recordToDelete, selectedCurrency, rates).bolivares}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
+                <span>Categoría: <strong>{recordToDelete.category || 'General'}</strong></span>
+                <span>Pago: <strong className="uppercase">{recordToDelete.paymentMethod}</strong></span>
+              </div>
+            </div>
+
+            {/* IMPACTO EN INVENTARIO: COMPRAS / EGRESOS */}
+            {recordToDelete.type === 'egreso' && recordToDelete.purchasedItems && recordToDelete.purchasedItems.length > 0 && (
+              <div className="bg-amber-50/90 border border-amber-200/80 rounded-2xl p-3.5 space-y-2 text-left">
+                <div className="flex items-center gap-2 text-amber-950 font-black text-xs">
+                  <Package className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>Reversión automática de inventario</span>
+                </div>
+                <p className="text-[11px] text-amber-900 leading-snug">
+                  Esta compra sumó unidades a tu stock. Al eliminarla, se <strong>restarán automáticamente</strong> para que el inventario vuelva a su cantidad previa:
+                </p>
+                <div className="space-y-1.5 pt-1 border-t border-amber-200/60">
+                  {recordToDelete.purchasedItems.map(pi => {
+                    const currentProd = inventory.find(p => p.id === pi.productId);
+                    const currentStock = currentProd?.stock ?? 0;
+                    const finalStock = Math.max(0, currentStock - pi.quantity);
+                    return (
+                      <div key={pi.productId} className="flex items-center justify-between bg-white/90 px-2.5 py-1.5 rounded-xl text-xs border border-amber-200/60">
+                        <span className="font-bold text-slate-800">{pi.name}</span>
+                        <div className="text-right">
+                          <span className="text-[11px] text-slate-600">
+                            {currentStock} en stock ➔ <strong className="text-rose-600 font-black">{finalStock}</strong>
+                          </span>
+                          <span className="ml-1.5 text-[10px] font-black text-rose-600 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded">
+                            -{pi.quantity}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* IMPACTO EN INVENTARIO: VENTAS / INGRESOS */}
+            {recordToDelete.type === 'ingreso' && recordToDelete.soldItems && recordToDelete.soldItems.length > 0 && (
+              <div className="bg-blue-50/90 border border-blue-200/80 rounded-2xl p-3.5 space-y-2 text-left">
+                <div className="flex items-center gap-2 text-blue-950 font-black text-xs">
+                  <Package className="w-4 h-4 text-blue-600 shrink-0" />
+                  <span>Restauración automática de stock</span>
+                </div>
+                <p className="text-[11px] text-blue-900 leading-snug">
+                  Esta venta descontó unidades del inventario. Al eliminarla, se <strong>devolverán automáticamente</strong>:
+                </p>
+                <div className="space-y-1.5 pt-1 border-t border-blue-200/60">
+                  {recordToDelete.soldItems.map(si => {
+                    const currentProd = inventory.find(p => p.id === si.productId);
+                    const currentStock = currentProd?.stock ?? 0;
+                    const finalStock = currentStock + si.quantity;
+                    return (
+                      <div key={si.productId} className="flex items-center justify-between bg-white/90 px-2.5 py-1.5 rounded-xl text-xs border border-blue-200/60">
+                        <span className="font-bold text-slate-800">{si.name}</span>
+                        <div className="text-right">
+                          <span className="text-[11px] text-slate-600">
+                            {currentStock} en stock ➔ <strong className="text-emerald-600 font-black">{finalStock}</strong>
+                          </span>
+                          <span className="ml-1.5 text-[10px] font-black text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
+                            +{si.quantity}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Checkbox opcional de reversión si hay items asociados */}
+            {((recordToDelete.type === 'egreso' && recordToDelete.purchasedItems && recordToDelete.purchasedItems.length > 0) ||
+              (recordToDelete.type === 'ingreso' && recordToDelete.soldItems && recordToDelete.soldItems.length > 0)) && (
+              <label className="flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer select-none pt-1">
+                <input
+                  type="checkbox"
+                  checked={revertStockOnDelete}
+                  onChange={(e) => setRevertStockOnDelete(e.target.checked)}
+                  className="w-4 h-4 rounded-md text-rose-600 focus:ring-rose-500 border-slate-300 cursor-pointer"
+                />
+                <span>Revertir cantidades en el inventario automáticamente</span>
+              </label>
+            )}
+
+            {/* Acciones */}
+            <div className="flex items-center gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setRecordToDelete(null)}
+                className="flex-1 py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer text-center"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onDeleteRecord(recordToDelete.id, { revertInventory: revertStockOnDelete });
+                  setRecordToDelete(null);
+                }}
+                className="flex-1 py-2.5 px-4 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-black shadow-md shadow-rose-200 hover:shadow-none transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Sí, eliminar {recordToDelete.type === 'egreso' ? 'compra' : 'registro'}</span>
+              </button>
+            </div>
+          </motion.div>
         </div>
       )}
     </motion.div>

@@ -42,12 +42,16 @@ export const DEFAULT_PRO_FEATURES_CONFIG: ProFeaturesConfig = {
 };
 
 export type TransactionType = 'ingreso' | 'egreso';
+export type ProductCurrency = 'USD' | 'EUR' | 'VES';
 
 export interface SoldItemDetail {
   productId: string;
   name: string;
   quantity: number;
   unitPrice: number;
+  unitCost?: number;
+  costCurrency?: ProductCurrency;
+  priceCurrency?: ProductCurrency;
 }
 
 export interface PurchasedItemDetail {
@@ -55,6 +59,7 @@ export interface PurchasedItemDetail {
   name: string;
   quantity: number;
   unitCost: number;
+  currency?: ProductCurrency;
 }
 
 export interface FinancialRecord {
@@ -77,8 +82,11 @@ export interface InventoryItem {
   id: string;
   name: string;
   stock: number;
-  cost: number; // Cost price in USD
-  price: number; // Sale price in USD
+  cost: number; // Cost price in costCurrency
+  price: number; // Sale price in priceCurrency
+  currency?: 'USD' | 'EUR'; // Base fallback currency for legacy records
+  costCurrency?: ProductCurrency; // Currency for the acquisition cost ($ USD, € EUR, Bs. VES)
+  priceCurrency?: ProductCurrency; // Currency for retail sale price ($ USD, € EUR, Bs. VES)
   status: 'disponible' | 'no_disponible';
   iconColor?: string;
   category?: string;

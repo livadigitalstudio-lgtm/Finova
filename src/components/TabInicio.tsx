@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { ExchangeRates, PlanType, InventoryItem, FinancialRecord, DebtItem, ProFeaturesConfig } from '../types';
-import { formatMoney, CurrencyCode } from '../utils/currency';
+import { formatMoney, CurrencyCode, getRecordAmountInCurrency } from '../utils/currency';
 import { getLocalDateString, parseDateSafe } from '../utils/dateUtils';
 
 interface TabInicioProps {
@@ -59,11 +59,28 @@ export default function TabInicio({
   
   const { todaySales, todayExpenses, todayBalance, totalInventoryValue } = useMemo(() => {
     const todayRecs = records.filter(r => parseDateSafe(r.date).formatted === todayStr);
-    const sales = todayRecs.filter(r => r.type === 'ingreso').reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-    const expenses = todayRecs.filter(r => r.type === 'egreso').reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+    const sales = todayRecs
+      .filter(r => r.type === 'ingreso')
+      .reduce((sum, r) => sum + getRecordAmountInCurrency(r, selectedCurrency, rates), 0);
+    const expenses = todayRecs
+      .filter(r => r.type === 'egreso')
+      .reduce((sum, r) => sum + getRecordAmountInCurrency(r, selectedCurrency, rates), 0);
     const balance = sales - expenses;
 
-    const invValue = inventory.reduce((sum, item) => sum + (item.stock * item.price), 0);
+    const bcvUsd = rates?.bcvUsd && rates.bcvUsd > 0 ? rates.bcvUsd : 832.49;
+    const bcvEur = rates?.bcvEur && rates.bcvEur > 0 ? rates.bcvEur : 968.07;
+    const invValue = inventory.reduce((sum, item) => {
+      const itemCur = item.currency || 'USD';
+      let itemVal = (item.stock || 0) * (item.price || 0);
+      if (itemCur !== selectedCurrency) {
+        if (selectedCurrency === 'EUR' && bcvUsd > 0 && bcvEur > 0) {
+          itemVal = (itemVal * bcvUsd) / bcvEur;
+        } else if (selectedCurrency === 'USD' && bcvUsd > 0 && bcvEur > 0) {
+          itemVal = (itemVal * bcvEur) / bcvUsd;
+        }
+      }
+      return sum + itemVal;
+    }, 0);
 
     return {
       todaySales: sales,
@@ -71,7 +88,7 @@ export default function TabInicio({
       todayBalance: balance,
       totalInventoryValue: invValue
     };
-  }, [records, todayStr, inventory]);
+  }, [records, todayStr, inventory, selectedCurrency, rates]);
 
   const salesMoney = useMemo(() => formatMoney(todaySales, selectedCurrency, rates), [todaySales, selectedCurrency, rates]);
   const balanceMoney = useMemo(() => formatMoney(todayBalance, selectedCurrency, rates), [todayBalance, selectedCurrency, rates]);

@@ -8,6 +8,7 @@ import {
 import { 
   FinancialRecord, InventoryItem, DebtItem, ExchangeRates, PurchasedItemDetail 
 } from '../types';
+import { convertAmount } from '../utils/currency';
 import { getLocalDateString } from '../utils/dateUtils';
 import { storageService } from '../services/storageService';
 
@@ -201,22 +202,24 @@ export function ExpenseFlowModal({
       if (typeof qty === 'number' && qty > 0) {
         const prod = inventory.find(p => p.id === prodId);
         if (prod) {
+          const prodCostCur = prod.costCurrency || prod.currency || 'USD';
           let defaultUnitCost = prod.cost || prod.price || 0;
-          if (currency === 'EUR') {
-            defaultUnitCost = parseFloat((defaultUnitCost * (officialRateUSD / officialRateEUR)).toFixed(2));
+          if (prodCostCur !== currency) {
+            defaultUnitCost = parseFloat(convertAmount(defaultUnitCost, prodCostCur, currency, rates).toFixed(2));
           }
           const unitCost = productUnitCosts[prodId] !== undefined ? productUnitCosts[prodId] : defaultUnitCost;
           list.push({
             productId: prod.id,
             name: prod.name,
             quantity: qty,
-            unitCost
+            unitCost,
+            currency: currency
           });
         }
       }
     }
     return list;
-  }, [selectedProductQuantities, productUnitCosts, inventory, currency, officialRateUSD, officialRateEUR]);
+  }, [selectedProductQuantities, productUnitCosts, inventory, currency, rates]);
 
   // Total calculated cost from products
   const totalCalculatedFromProducts = useMemo(() => {
@@ -252,9 +255,14 @@ export function ExpenseFlowModal({
       [prod.id]: newQty
     }));
     if (productUnitCosts[prod.id] === undefined) {
+      const prodCostCur = prod.costCurrency || prod.currency || 'USD';
+      const baseCost = prod.cost || prod.price || 0;
+      const initialCost = prodCostCur !== currency
+        ? parseFloat(convertAmount(baseCost, prodCostCur, currency, rates).toFixed(2))
+        : baseCost;
       setProductUnitCosts(prev => ({
         ...prev,
-        [prod.id]: prod.cost || prod.price || 0
+        [prod.id]: initialCost
       }));
     }
   };
@@ -293,19 +301,15 @@ export function ExpenseFlowModal({
     const price = parseFloat(newProdPrice.replace(',', '.')) || (cost > 0 ? Number((cost * 1.3).toFixed(2)) : 0);
     const qty = parseInt(newProdQuantity, 10) || 1;
 
-    const costInUSD = currency === 'EUR' && officialRateUSD > 0 
-      ? parseFloat((cost * (officialRateEUR / officialRateUSD)).toFixed(2)) 
-      : cost;
-    const priceInUSD = currency === 'EUR' && officialRateUSD > 0 
-      ? parseFloat((price * (officialRateEUR / officialRateUSD)).toFixed(2)) 
-      : price;
-
     try {
       const createdItem = await onAddProduct({
         name: newProdName.trim(),
         stock: qty,
-        cost: costInUSD,
-        price: priceInUSD,
+        cost: cost,
+        price: price,
+        costCurrency: currency,
+        priceCurrency: currency,
+        currency: currency,
         status: 'disponible',
         category: newProdCategory.trim() || 'General'
       });

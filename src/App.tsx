@@ -831,9 +831,13 @@ export default function App() {
     purchasedItems?: PurchasedItemDetail[]
   ) => {
     const recordId = `rec-${Date.now()}`;
+    const recordCurrency = newRec.currency || 'USD';
+    const currencySym = recordCurrency === 'EUR' ? '€' : '$';
+
     const fullRec: FinancialRecord = {
       ...newRec,
       id: recordId,
+      currency: recordCurrency,
       soldItems: soldItems && soldItems.length > 0 ? soldItems : newRec.soldItems,
       purchasedItems: purchasedItems && purchasedItems.length > 0 ? purchasedItems : newRec.purchasedItems
     };
@@ -900,7 +904,7 @@ export default function App() {
 
       handleAddAuditLog(
         'Venta con descuento de inventario',
-        `Venta de $${newRec.amount} ${newRec.currency || 'USD'}. Descontados: ${deductedSummary.join(', ')}`,
+        `Venta de ${currencySym}${newRec.amount} ${recordCurrency}. Descontados: ${deductedSummary.join(', ')}`,
         'inventario'
       );
     } else if (newRec.type === 'egreso' && purchasedItems && purchasedItems.length > 0) {
@@ -913,11 +917,13 @@ export default function App() {
           if (prod.id === item.productId) {
             const newStock = (prod.stock || 0) + item.quantity;
             const newCost = item.unitCost > 0 ? item.unitCost : prod.cost;
+            const newCostCurrency = item.currency || (newRec.currency === 'EUR' ? 'EUR' : (newRec.currency === 'USD' ? 'USD' : (prod.costCurrency || 'USD')));
             restockedSummary.push(`${item.quantity}x "${prod.name}" (nuevo stock: ${newStock})`);
             return {
               ...prod,
               stock: newStock,
               cost: newCost,
+              costCurrency: newCostCurrency,
               status: 'disponible' as const
             };
           }
@@ -936,6 +942,7 @@ export default function App() {
             await updateDoc(docRef, {
               stock: prod.stock,
               cost: prod.cost,
+              costCurrency: prod.costCurrency || 'USD',
               status: prod.status
             });
           } catch (e) {
@@ -943,7 +950,7 @@ export default function App() {
               type: 'update_stock',
               collectionPath: 'inventory',
               docId: prod.id,
-              payload: { stock: prod.stock, cost: prod.cost, status: prod.status },
+              payload: { stock: prod.stock, cost: prod.cost, costCurrency: prod.costCurrency || 'USD', status: prod.status },
               userId: currentUser.uid
             });
           }
@@ -952,7 +959,7 @@ export default function App() {
             type: 'update_stock',
             collectionPath: 'inventory',
             docId: prod.id,
-            payload: { stock: prod.stock, cost: prod.cost, status: prod.status },
+            payload: { stock: prod.stock, cost: prod.cost, costCurrency: prod.costCurrency || 'USD', status: prod.status },
             userId: currentUser.uid
           });
         }
@@ -962,7 +969,7 @@ export default function App() {
 
       handleAddAuditLog(
         'Gasto con ingreso a inventario',
-        `Gasto de $${newRec.amount} ${newRec.currency || 'USD'}. Ingresados al inventario: ${restockedSummary.join(', ')}`,
+        `Gasto de ${currencySym}${newRec.amount} ${recordCurrency}. Ingresados al inventario: ${restockedSummary.join(', ')}`,
         'inventario'
       );
     } else {
@@ -970,7 +977,7 @@ export default function App() {
 
       handleAddAuditLog(
         newRec.type === 'ingreso' ? 'Registro Ingreso' : 'Registro Gasto',
-        `Registrado: ${newRec.type === 'ingreso' ? 'Ingreso/Venta' : 'Gasto'} de $${newRec.amount} USD | Bs ${newRec.amountBs} (${newRec.description})`,
+        `Registrado: ${newRec.type === 'ingreso' ? 'Ingreso/Venta' : 'Gasto'} de ${currencySym}${newRec.amount} ${recordCurrency} | Bs ${newRec.amountBs} (${newRec.description})`,
         'finanzas'
       );
     }
@@ -1000,21 +1007,122 @@ export default function App() {
     }
   };
 
-  // Deletion of transactions
-  const handleDeleteRecord = async (id: string) => {
+  // Deletion of transactions with automatic inventory reversal
+  const handleDeleteRecord = async (id: string, options?: { revertInventory?: boolean }) => {
     const target = records.find(r => r.id === id);
-    const updated = records.filter(r => r.id !== id);
-    saveRecords(updated);
-    showToast('Registro financiero eliminado.');
+    if (!target) return;
 
-    if (target) {
-      handleAddAuditLog(
-        'Eliminar registro',
-        `Removido: ${target.type === 'ingreso' ? 'Ingreso' : 'Egreso'} de $${target.amount} USD (${target.description})`,
-        'finanzas'
-      );
+    const shouldRevert = options?.revertInventory !== false;
+    let updatedInventory = [...inventory];
+    const inventoryAdjustmentsSummary: string[] = [];
+    const touchedProducts: InventoryItem[] = [];
+
+    if (shouldRevert) {
+      // 1. If it was an EGRESO (merchandise purchase) with purchasedItems, subtract the restocked quantity
+      if (target.type === 'egreso' && target.purchasedItems && target.purchasedItems.length > 0) {
+        for (const item of target.purchasedItems) {
+          updatedInventory = updatedInventory.map(prod => {
+            if (prod.id === item.productId) {
+              const currentStock = prod.stock || 0;
+              const newStock = Math.max(0, currentStock - item.quantity);
+              inventoryAdjustmentsSummary.push(
+                `"${prod.name}": ${currentStock} ➔ ${newStock} (-${item.quantity} un.)`
+              );
+              const updatedProd: InventoryItem = {
+                ...prod,
+                stock: newStock,
+                status: newStock === 0 ? ('no_disponible' as const) : ('disponible' as const)
+              };
+              touchedProducts.push(updatedProd);
+              return updatedProd;
+            }
+            return prod;
+          });
+        }
+      } 
+      // 2. If it was an INGRESO (sale) with soldItems, restore the sold quantity
+      else if (target.type === 'ingreso' && target.soldItems && target.soldItems.length > 0) {
+        for (const item of target.soldItems) {
+          updatedInventory = updatedInventory.map(prod => {
+            if (prod.id === item.productId) {
+              const currentStock = prod.stock || 0;
+              const newStock = currentStock + item.quantity;
+              inventoryAdjustmentsSummary.push(
+                `"${prod.name}": ${currentStock} ➔ ${newStock} (+${item.quantity} un.)`
+              );
+              const updatedProd: InventoryItem = {
+                ...prod,
+                stock: newStock,
+                status: 'disponible' as const
+              };
+              touchedProducts.push(updatedProd);
+              return updatedProd;
+            }
+            return prod;
+          });
+        }
+      }
     }
 
+    // If inventory items were modified, save and synchronize
+    if (touchedProducts.length > 0) {
+      saveInventory(updatedInventory);
+
+      for (const prod of touchedProducts) {
+        if (isCloudSyncActive && currentUser?.uid && isOnline) {
+          try {
+            await updateDoc(doc(db, 'users', currentUser.uid, 'inventory', prod.id), {
+              stock: prod.stock,
+              status: prod.status
+            });
+          } catch (e) {
+            syncQueueService.enqueue({
+              type: 'update_stock',
+              collectionPath: 'inventory',
+              docId: prod.id,
+              payload: { stock: prod.stock, status: prod.status },
+              userId: currentUser.uid
+            });
+          }
+        } else if (currentUser?.uid) {
+          syncQueueService.enqueue({
+            type: 'update_stock',
+            collectionPath: 'inventory',
+            docId: prod.id,
+            payload: { stock: prod.stock, status: prod.status },
+            userId: currentUser.uid
+          });
+        }
+      }
+    }
+
+    // Remove from records state and local storage
+    const updatedRecords = records.filter(r => r.id !== id);
+    saveRecords(updatedRecords);
+
+    // Dynamic Toast
+    if (inventoryAdjustmentsSummary.length > 0) {
+      showToast(
+        `Registro eliminado. Stock revertido: ${inventoryAdjustmentsSummary.join(', ')}`
+      );
+    } else {
+      showToast(`${target.type === 'ingreso' ? 'Ingreso/Venta' : 'Egreso/Compra'} eliminado.`);
+    }
+
+    // Audit Log
+    const recordLabel = target.type === 'ingreso' ? 'Venta/Ingreso' : 'Compra/Egreso';
+    const curSym = target.currency === 'EUR' ? '€' : '$';
+    handleAddAuditLog(
+      `Eliminar ${recordLabel}`,
+      `Eliminado: ${recordLabel} de ${curSym}${target.amount} ${target.currency || 'USD'} (${target.description}).${
+        inventoryAdjustmentsSummary.length > 0
+          ? ` Inventario restaurado: ${inventoryAdjustmentsSummary.join(' | ')}`
+          : ''
+      }`,
+      touchedProducts.length > 0 ? 'inventario' : 'finanzas'
+    );
+
+    // Cloud sync for records deletion
     if (isCloudSyncActive && currentUser?.uid && isOnline) {
       try {
         await deleteDoc(doc(db, 'users', currentUser.uid, 'records', id));
@@ -1047,11 +1155,13 @@ export default function App() {
         if (prod.id === item.productId) {
           const newStock = (prod.stock || 0) + item.quantity;
           const newCost = item.unitCost > 0 ? item.unitCost : prod.cost;
+          const newCostCurrency = item.currency || prod.costCurrency || 'USD';
           restockedSummary.push(`${item.quantity}x "${prod.name}" (nuevo stock: ${newStock})`);
           return {
             ...prod,
             stock: newStock,
             cost: newCost,
+            costCurrency: newCostCurrency,
             status: 'disponible' as const
           };
         }
@@ -1070,6 +1180,7 @@ export default function App() {
           await updateDoc(docRef, {
             stock: prod.stock,
             cost: prod.cost,
+            costCurrency: prod.costCurrency || 'USD',
             status: prod.status
           });
         } catch (e) {
@@ -1077,7 +1188,7 @@ export default function App() {
             type: 'update_stock',
             collectionPath: 'inventory',
             docId: prod.id,
-            payload: { stock: prod.stock, cost: prod.cost, status: prod.status },
+            payload: { stock: prod.stock, cost: prod.cost, costCurrency: prod.costCurrency || 'USD', status: prod.status },
             userId: currentUser.uid
           });
         }
@@ -1086,7 +1197,7 @@ export default function App() {
           type: 'update_stock',
           collectionPath: 'inventory',
           docId: prod.id,
-          payload: { stock: prod.stock, cost: prod.cost, status: prod.status },
+          payload: { stock: prod.stock, cost: prod.cost, costCurrency: prod.costCurrency || 'USD', status: prod.status },
           userId: currentUser.uid
         });
       }
@@ -1104,8 +1215,13 @@ export default function App() {
   // Catalogue product registration
   const handleAddProduct = async (newItem: Omit<InventoryItem, 'id'>): Promise<InventoryItem> => {
     const prodId = `prod-${Date.now()}`;
+    const costCur = newItem.costCurrency || newItem.currency || 'USD';
+    const priceCur = newItem.priceCurrency || newItem.currency || 'USD';
     const fullItem: InventoryItem = {
       ...newItem,
+      costCurrency: costCur,
+      priceCurrency: priceCur,
+      currency: priceCur === 'EUR' ? 'EUR' : 'USD',
       id: prodId
     };
 
@@ -1113,9 +1229,11 @@ export default function App() {
     saveInventory(updated);
     showToast(`Producto "${newItem.name}" añadido al catálogo.`);
 
+    const costCode = costCur === 'VES' ? 'Bs.' : (costCur === 'EUR' ? '€' : '$');
+    const priceCode = priceCur === 'VES' ? 'Bs.' : (priceCur === 'EUR' ? '€' : '$');
     handleAddAuditLog(
       'Nuevo producto',
-      `Creado producto "${newItem.name}" | Categoría: ${newItem.category || 'General'} | Precio: $${newItem.price} USD | Stock: ${newItem.stock}`,
+      `Creado producto "${newItem.name}" | Categoría: ${newItem.category || 'General'} | Costo: ${costCode}${newItem.cost} | Venta: ${priceCode}${newItem.price} | Stock: ${newItem.stock}`,
       'inventario'
     );
 
@@ -1923,6 +2041,7 @@ export default function App() {
         return (
           <TabBalance
             records={records}
+            inventory={inventory}
             onDeleteRecord={handleDeleteRecord}
             onOpenSale={() => setIsSaleOpen(true)}
             onOpenExpense={() => setIsExpenseOpen(true)}
@@ -1950,11 +2069,14 @@ export default function App() {
         return (
           <TabInventario
             inventory={inventory}
+            records={records}
+            onDeleteRecord={handleDeleteRecord}
             onAddProduct={handleAddProduct}
             onDeleteProduct={handleDeleteProduct}
             onUpdateProductStock={handleUpdateProductStock}
             onUpdateProductDetails={handleUpdateProductDetails}
             onOpenCreateModal={() => setIsCreateProductOpen(true)}
+            onOpenExpense={() => setIsExpenseOpen(true)}
             onSellProduct={(item) => {
               setSalePreselectedProductId(item.id);
               setIsSaleOpen(true);
@@ -2743,6 +2865,7 @@ export default function App() {
         isOpen={isCreateProductOpen}
         onClose={() => setIsCreateProductOpen(false)}
         onSubmit={handleAddProduct}
+        rates={exchangeRates}
       />
 
       {/* D. Create Debt entry */}

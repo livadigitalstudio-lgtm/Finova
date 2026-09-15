@@ -3,8 +3,9 @@ import {
   X, DollarSign, Tag, Calendar, UserPlus, CreditCard, Shield,
   Package, Search, Plus, Minus, Check, ShoppingBag, AlertCircle, RotateCcw
 } from 'lucide-react';
-import { FinancialRecord, InventoryItem, DebtItem, ExchangeRates, SoldItemDetail } from '../types';
+import { FinancialRecord, InventoryItem, DebtItem, ExchangeRates, SoldItemDetail, ProductCurrency } from '../types';
 import { getLocalDateString } from '../utils/dateUtils';
+import { getProductProfitMetrics, getCurrencySymbol, getCurrencyLabel } from '../utils/currency';
 import DebtFlowModal from './DebtFlowModal';
 
 const EMPTY_INVENTORY: InventoryItem[] = [];
@@ -91,8 +92,12 @@ export function AddRecordModal({
   }, [selectedQuantities, inventory]);
 
   const totalCalculatedFromInventory = useMemo(() => {
-    return soldItemsList.reduce((acc, curr) => acc + (curr.item.price * curr.quantity), 0);
-  }, [soldItemsList]);
+    const usdTotal = soldItemsList.reduce((acc, curr) => acc + (curr.item.price * curr.quantity), 0);
+    if (currency === 'EUR' && (rates?.bcvUsd || 0) > 0 && (rates?.bcvEur || 0) > 0) {
+      return (usdTotal * rates.bcvUsd) / rates.bcvEur;
+    }
+    return usdTotal;
+  }, [soldItemsList, currency, rates]);
 
   const totalUnitsSelected = useMemo(() => {
     return soldItemsList.reduce((acc, curr) => acc + curr.quantity, 0);
@@ -118,7 +123,7 @@ export function AddRecordModal({
 
   if (!isOpen) return null;
 
-  const currentRate = currency === 'USD' ? (rates?.bcvUsd || 45.1) : (rates?.bcvEur || 48.3);
+  const currentRate = currency === 'USD' ? (rates?.bcvUsd || 832.49) : (rates?.bcvEur || 968.07);
 
   // Stepper handlers
   const handleIncreaseQty = (prod: InventoryItem) => {
@@ -154,6 +159,26 @@ export function AddRecordModal({
     setUserCustomNote('');
   };
 
+  // Currency switch maintaining Bolívares equilibrium
+  const handleSwitchCurrency = (newCurr: 'USD' | 'EUR') => {
+    if (currency === newCurr) return;
+    if (amount && !isNaN(parseFloat(amount)) && parseFloat(amount) > 0) {
+      const oldRate = currency === 'USD' ? (rates?.bcvUsd || 832.49) : (rates?.bcvEur || 968.07);
+      const newRate = newCurr === 'USD' ? (rates?.bcvUsd || 832.49) : (rates?.bcvEur || 968.07);
+      if (oldRate > 0 && newRate > 0) {
+        const bs = parseFloat(amount) * oldRate;
+        const converted = bs / newRate;
+        setAmount(converted.toFixed(2));
+      }
+    }
+    setCurrency(newCurr);
+    if (newCurr === 'USD' && paymentMethod.includes('EUR')) {
+      setPaymentMethod('Efectivo USD');
+    } else if (newCurr === 'EUR' && paymentMethod.includes('USD')) {
+      setPaymentMethod('Efectivo EUR');
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const finalAmountVal = isInventorySaleActive ? totalCalculatedFromInventory : parseFloat(amount);
@@ -165,14 +190,19 @@ export function AddRecordModal({
       finalMethod = 'Efectivo EUR';
     }
 
-    // Prepare soldItems array if products were selected
+    // Prepare soldItems array if products were selected, converting unit price if in EUR
     const soldItems: SoldItemDetail[] = isInventorySaleActive
-      ? soldItemsList.map(s => ({
-          productId: s.item.id,
-          name: s.item.name,
-          quantity: s.quantity,
-          unitPrice: s.item.price
-        }))
+      ? soldItemsList.map(s => {
+          const unitPriceInCurrency = currency === 'EUR' && (rates?.bcvUsd || 0) > 0 && (rates?.bcvEur || 0) > 0
+            ? (s.item.price * rates.bcvUsd) / rates.bcvEur
+            : s.item.price;
+          return {
+            productId: s.item.id,
+            name: s.item.name,
+            quantity: s.quantity,
+            unitPrice: parseFloat(unitPriceInCurrency.toFixed(2))
+          };
+        })
       : [];
 
     const finalDescription = isInventorySaleActive
@@ -185,7 +215,7 @@ export function AddRecordModal({
 
     onSubmit({
       type,
-      amount: finalAmountVal,
+      amount: parseFloat(finalAmountVal.toFixed(2)),
       currency,
       amountBs: parseFloat((finalAmountVal * currentRate).toFixed(2)),
       exchangeRateUsed: currentRate,
@@ -390,7 +420,7 @@ export function AddRecordModal({
                             <div className="flex items-center gap-1.5 text-emerald-900 font-black text-[11px]">
                               <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                               <span>{totalUnitsSelected} {totalUnitsSelected === 1 ? 'unidad seleccionada' : 'unidades seleccionadas'}</span>
-                              <span className="text-emerald-700">(${totalCalculatedFromInventory.toFixed(2)} USD)</span>
+                              <span className="text-emerald-700">({currency === 'USD' ? '$' : '€'}{totalCalculatedFromInventory.toFixed(2)} {currency})</span>
                             </div>
                             <p className="text-[10px] text-emerald-700 truncate mt-0.5">
                               Se descontará automáticamente del stock al guardar.
@@ -420,20 +450,14 @@ export function AddRecordModal({
             <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl">
               <button
                 type="button"
-                onClick={() => {
-                  setCurrency('USD');
-                  if (paymentMethod === 'Efectivo EUR') setPaymentMethod('Efectivo USD');
-                }}
+                onClick={() => handleSwitchCurrency('USD')}
                 className={`py-1.5 text-center rounded-lg font-bold transition-all cursor-pointer ${currency === 'USD' ? 'bg-white shadow-xs text-slate-900 font-black' : 'text-slate-550 hover:bg-slate-50'}`}
               >
                 Dólar ($ USD)
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setCurrency('EUR');
-                  if (paymentMethod === 'Efectivo USD') setPaymentMethod('Efectivo EUR');
-                }}
+                onClick={() => handleSwitchCurrency('EUR')}
                 className={`py-1.5 text-center rounded-lg font-bold transition-all cursor-pointer ${currency === 'EUR' ? 'bg-white shadow-xs text-slate-900 font-black' : 'text-slate-550 hover:bg-slate-50'}`}
               >
                 Euro (€ EUR)
@@ -593,16 +617,33 @@ interface AddInventoryModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSubmit: (item: Omit<InventoryItem, 'id'>) => void;
+  rates?: ExchangeRates;
 }
 
-export function AddInventoryModal({ isOpen, onClose, onSubmit }: AddInventoryModalProps) {
+export function AddInventoryModal({ isOpen, onClose, onSubmit, rates }: AddInventoryModalProps) {
   const [name, setName] = useState('');
+  const [costCurrency, setCostCurrency] = useState<ProductCurrency>('USD');
+  const [priceCurrency, setPriceCurrency] = useState<ProductCurrency>('USD');
   const [stock, setStock] = useState('0');
   const [cost, setCost] = useState('');
   const [price, setPrice] = useState('');
   const [category, setCategory] = useState('');
 
   if (!isOpen) return null;
+
+  const costSymbol = getCurrencySymbol(costCurrency);
+  const priceSymbol = getCurrencySymbol(priceCurrency);
+
+  const profitMetrics = getProductProfitMetrics(
+    {
+      cost: parseFloat(cost) || 0,
+      price: parseFloat(price) || 0,
+      costCurrency,
+      priceCurrency
+    },
+    rates || { bcvUsd: 832.49, bcvEur: 968.07, paraleloUsd: 957.36, lastUpdated: '' },
+    'USD'
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -630,6 +671,9 @@ export function AddInventoryModal({ isOpen, onClose, onSubmit }: AddInventoryMod
       stock: stockNum,
       cost: costNum,
       price: priceNum,
+      costCurrency,
+      priceCurrency,
+      currency: priceCurrency === 'EUR' ? 'EUR' : 'USD',
       status,
       category: category.trim() || undefined,
       iconColor: pickedColor
@@ -637,6 +681,8 @@ export function AddInventoryModal({ isOpen, onClose, onSubmit }: AddInventoryMod
 
     // Reset fields
     setName('');
+    setCostCurrency('USD');
+    setPriceCurrency('USD');
     setStock('0');
     setCost('');
     setPrice('');
@@ -646,12 +692,15 @@ export function AddInventoryModal({ isOpen, onClose, onSubmit }: AddInventoryMod
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-      <div className="bg-white rounded-3xl w-full max-w-sm overflow-hidden border border-slate-200 shadow-2xl">
+      <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden border border-slate-200 shadow-2xl">
         <div className="p-4 bg-slate-900 text-white flex justify-between items-center">
-          <h3 className="font-extrabold text-sm tracking-tight flex items-center gap-1.5">
-            <Tag className="w-4 h-4 text-blue-400" />
-            Nueva Referencia de Inventario
-          </h3>
+          <div>
+            <h3 className="font-extrabold text-sm tracking-tight flex items-center gap-1.5">
+              <Tag className="w-4 h-4 text-blue-400" />
+              Nueva Referencia de Inventario
+            </h3>
+            <p className="text-[10px] text-slate-400">Configura monedas de costo y venta independientes</p>
+          </div>
           <button onClick={onClose} className="rounded-full bg-white/10 p-1.5 hover:bg-white/20 transition-all text-white cursor-pointer">
             <X className="w-4 h-4" />
           </button>
@@ -663,7 +712,7 @@ export function AddInventoryModal({ isOpen, onClose, onSubmit }: AddInventoryMod
             <input
               type="text"
               required
-              placeholder="Ej. Nombre del producto..."
+              placeholder="Ej. Harina Pan 1kg, Aceite, etc."
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 font-medium focus:outline-none focus:ring-1 focus:ring-slate-900 focus:bg-white"
@@ -681,14 +730,14 @@ export function AddInventoryModal({ isOpen, onClose, onSubmit }: AddInventoryMod
                 onChange={(e) => setStock(e.target.value)}
                 className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 font-mono font-bold focus:outline-none focus:ring-1 focus:ring-slate-900 focus:bg-white"
               />
-              <p className="text-[9px] text-slate-400 mt-1">Stock=0 pondrá No Disponible</p>
+              <p className="text-[9px] text-slate-400 mt-1">Stock=0 marcará agotado</p>
             </div>
 
             <div>
-              <label className="block text-slate-500 font-extrabold tracking-wider uppercase text-[9px] mb-1.5">CATEGORÍA DEL PRODUCTO</label>
+              <label className="block text-slate-500 font-extrabold tracking-wider uppercase text-[9px] mb-1.5">CATEGORÍA</label>
               <input
                 type="text"
-                placeholder="Escribe o asigna tu categoría..."
+                placeholder="Ej. Alimentos, Limpieza..."
                 value={category}
                 onChange={(e) => setCategory(e.target.value)}
                 className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 font-bold focus:outline-none focus:ring-1 focus:ring-slate-900 focus:bg-white"
@@ -696,11 +745,49 @@ export function AddInventoryModal({ isOpen, onClose, onSubmit }: AddInventoryMod
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          {/* Independent Currency and Value Sections */}
+          <div className="p-3 bg-slate-50/80 rounded-2xl border border-slate-200/80 space-y-3">
+            {/* Cost section */}
             <div>
-              <label className="block text-slate-500 font-extrabold tracking-wider uppercase text-[9px] mb-1.5">COSTO UNITARIO ($)</label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-slate-600 font-extrabold tracking-wider uppercase text-[9px]">
+                  1. MONEDA Y COSTO DE COMPRA (ADQUISICIÓN)
+                </label>
+                <span className="text-[9px] font-bold text-slate-400">¿Cómo lo pagaste?</span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-1 bg-slate-200/70 p-0.5 rounded-xl mb-2">
+                <button
+                  type="button"
+                  onClick={() => setCostCurrency('USD')}
+                  className={`py-1.5 text-center rounded-lg font-bold text-[10px] transition-all cursor-pointer ${
+                    costCurrency === 'USD' ? 'bg-white shadow-xs text-emerald-800 font-black' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  $ Dólar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCostCurrency('EUR')}
+                  className={`py-1.5 text-center rounded-lg font-bold text-[10px] transition-all cursor-pointer ${
+                    costCurrency === 'EUR' ? 'bg-white shadow-xs text-blue-800 font-black' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  € Euro
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCostCurrency('VES')}
+                  className={`py-1.5 text-center rounded-lg font-bold text-[10px] transition-all cursor-pointer ${
+                    costCurrency === 'VES' ? 'bg-white shadow-xs text-purple-800 font-black' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Bs. BCV
+                </button>
+              </div>
+
               <div className="relative">
-                <span className="absolute left-3.5 top-2.5 font-bold text-slate-400">$</span>
+                <span className="absolute left-3.5 top-2.5 font-bold text-slate-400">{costSymbol}</span>
                 <input
                   type="number"
                   step="0.01"
@@ -708,15 +795,59 @@ export function AddInventoryModal({ isOpen, onClose, onSubmit }: AddInventoryMod
                   placeholder="0.00"
                   value={cost}
                   onChange={(e) => setCost(e.target.value)}
-                  className="w-full pl-7 pr-2 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-slate-850 font-bold focus:outline-none focus:ring-1 focus:ring-slate-900 focus:bg-white"
+                  className="w-full pl-8 pr-3 py-2 bg-white border border-slate-200 rounded-xl font-mono text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-slate-900"
                 />
               </div>
+
+              {parseFloat(cost) > 0 && (
+                <div className="flex items-center gap-2 mt-1 text-[9.5px] text-slate-500 font-mono">
+                  <span>≈ Bs. {profitMetrics.costInBs.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  {costCurrency !== 'USD' && <span>| ≈ ${profitMetrics.costInViewing.toFixed(2)} USD</span>}
+                </div>
+              )}
             </div>
 
-            <div>
-              <label className="block text-slate-500 font-extrabold tracking-wider uppercase text-[9px] mb-1.5">PRECIO DE VENTA ($)</label>
+            {/* Price section */}
+            <div className="pt-2 border-t border-slate-200/60">
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-slate-600 font-extrabold tracking-wider uppercase text-[9px]">
+                  2. MONEDA Y PRECIO DE VENTA (PVP AL PÚBLICO)
+                </label>
+                <span className="text-[9px] font-bold text-slate-400">¿Cómo lo venderás?</span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-1 bg-slate-200/70 p-0.5 rounded-xl mb-2">
+                <button
+                  type="button"
+                  onClick={() => setPriceCurrency('USD')}
+                  className={`py-1.5 text-center rounded-lg font-bold text-[10px] transition-all cursor-pointer ${
+                    priceCurrency === 'USD' ? 'bg-white shadow-xs text-emerald-800 font-black' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  $ Dólar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPriceCurrency('EUR')}
+                  className={`py-1.5 text-center rounded-lg font-bold text-[10px] transition-all cursor-pointer ${
+                    priceCurrency === 'EUR' ? 'bg-white shadow-xs text-blue-800 font-black' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  € Euro
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPriceCurrency('VES')}
+                  className={`py-1.5 text-center rounded-lg font-bold text-[10px] transition-all cursor-pointer ${
+                    priceCurrency === 'VES' ? 'bg-white shadow-xs text-purple-800 font-black' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Bs. BCV
+                </button>
+              </div>
+
               <div className="relative">
-                <span className="absolute left-3.5 top-2.5 font-bold text-slate-400">$</span>
+                <span className="absolute left-3.5 top-2.5 font-bold text-slate-400">{priceSymbol}</span>
                 <input
                   type="number"
                   step="0.01"
@@ -724,10 +855,42 @@ export function AddInventoryModal({ isOpen, onClose, onSubmit }: AddInventoryMod
                   placeholder="0.00"
                   value={price}
                   onChange={(e) => setPrice(e.target.value)}
-                  className="w-full pl-7 pr-2 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-slate-850 font-bold focus:outline-none focus:ring-1 focus:ring-slate-900 focus:bg-white"
+                  className="w-full pl-8 pr-3 py-2 bg-white border border-slate-200 rounded-xl font-mono text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-slate-900"
                 />
               </div>
+
+              {parseFloat(price) > 0 && (
+                <div className="flex items-center gap-2 mt-1 text-[9.5px] text-slate-500 font-mono">
+                  <span>≈ Bs. {profitMetrics.priceInBs.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  {priceCurrency !== 'USD' && <span>| ≈ ${profitMetrics.priceInViewing.toFixed(2)} USD</span>}
+                </div>
+              )}
             </div>
+
+            {/* Mixed currency live margin review */}
+            {(parseFloat(cost) > 0 || parseFloat(price) > 0) && (
+              <div className="pt-2 border-t border-slate-200/60 bg-white/70 p-2.5 rounded-xl">
+                <div className="flex items-center justify-between text-[10px] mb-1">
+                  <span className="font-extrabold uppercase text-slate-500 tracking-wider">Margen y Retorno Estimado:</span>
+                  <span className={`font-mono font-black px-1.5 py-0.5 rounded text-[10px] ${
+                    profitMetrics.unitProfitInPriceCur >= 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                  }`}>
+                    {profitMetrics.profitMarginPct.toFixed(1)}% Margen
+                  </span>
+                </div>
+                <div className="flex items-center justify-between font-mono text-xs font-bold text-slate-800">
+                  <span>Ganancia Neta Unitaria:</span>
+                  <span className={profitMetrics.unitProfitInPriceCur >= 0 ? 'text-emerald-700' : 'text-rose-600'}>
+                    {profitMetrics.unitProfitInPriceCur >= 0 ? '+' : ''}{priceSymbol}{profitMetrics.unitProfitInPriceCur.toFixed(2)} {priceCurrency}
+                  </span>
+                </div>
+                {profitMetrics.hasMixedCurrencies && (
+                  <p className="text-[9px] text-slate-400 mt-1">
+                    * Conversión automática: Comprado en {costCurrency} y cotizado en {priceCurrency} según tasa oficial BCV.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           <button

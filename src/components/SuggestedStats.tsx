@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { FinancialRecord, InventoryItem, ExchangeRates } from '../types';
 import { getLocalDateString, parseDateSafe, MONTH_SHORT_ES } from '../utils/dateUtils';
+import { getRecordAmountInCurrency, getRecordBolivares } from '../utils/currency';
 
 interface SuggestedStatsProps {
   records: FinancialRecord[];
@@ -21,12 +22,12 @@ export default function SuggestedStats({ records, inventory, rates, onClose }: S
     const incomesList = records.filter(r => r.type === 'ingreso');
     const expensesList = records.filter(r => r.type === 'egreso');
 
-    const totalIncomeUSD = incomesList.reduce((acc, r) => acc + r.amount, 0);
-    const totalExpenseUSD = expensesList.reduce((acc, r) => acc + r.amount, 0);
+    const totalIncomeUSD = incomesList.reduce((acc, r) => acc + getRecordAmountInCurrency(r, 'USD', rates), 0);
+    const totalExpenseUSD = expensesList.reduce((acc, r) => acc + getRecordAmountInCurrency(r, 'USD', rates), 0);
     const cashNetUSD = totalIncomeUSD - totalExpenseUSD;
 
-    const totalIncomeBs = incomesList.reduce((acc, r) => acc + (r.amountBs || r.amount * rates.bcvUsd), 0);
-    const totalExpenseBs = expensesList.reduce((acc, r) => acc + (r.amountBs || r.amount * rates.bcvUsd), 0);
+    const totalIncomeBs = incomesList.reduce((acc, r) => acc + getRecordBolivares(r, rates), 0);
+    const totalExpenseBs = expensesList.reduce((acc, r) => acc + getRecordBolivares(r, rates), 0);
 
     const averageSaleUSD = incomesList.length > 0 ? (totalIncomeUSD / incomesList.length) : 0;
     
@@ -34,7 +35,8 @@ export default function SuggestedStats({ records, inventory, rates, onClose }: S
     const methodAggrs: { [method: string]: number } = {};
     records.forEach(r => {
       const method = r.paymentMethod || 'Otros';
-      methodAggrs[method] = (methodAggrs[method] || 0) + r.amount;
+      const amt = getRecordAmountInCurrency(r, 'USD', rates);
+      methodAggrs[method] = (methodAggrs[method] || 0) + amt;
     });
 
     const parsedChannels = Object.keys(methodAggrs).map(chName => ({
@@ -66,8 +68,8 @@ export default function SuggestedStats({ records, inventory, rates, onClose }: S
 
     return dates.map(dt => {
       const dayRecs = (records || []).filter(r => parseDateSafe(r.date).formatted === dt);
-      const income = dayRecs.filter(r => r.type === 'ingreso').reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-      const expense = dayRecs.filter(r => r.type === 'egreso').reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+      const income = dayRecs.filter(r => r.type === 'ingreso').reduce((sum, r) => sum + getRecordAmountInCurrency(r, 'USD', rates), 0);
+      const expense = dayRecs.filter(r => r.type === 'egreso').reduce((sum, r) => sum + getRecordAmountInCurrency(r, 'USD', rates), 0);
       
       const { month, day } = parseDateSafe(dt);
       const label = `${day} ${MONTH_SHORT_ES[month - 1] || ''}`;
@@ -79,7 +81,7 @@ export default function SuggestedStats({ records, inventory, rates, onClose }: S
         expense
       };
     });
-  }, [records]);
+  }, [records, rates]);
 
   // Helper variables for SVG Coordinate calculations
   const chartLayout = useMemo(() => {
