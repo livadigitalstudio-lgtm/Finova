@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { getAuth, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -15,6 +15,13 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 // Database and Auth export (Critical: The app uses this database instance)
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId || '(default)');
 export const auth = getAuth(app);
+
+// Explicitly set persistent local authentication session
+if (typeof window !== 'undefined') {
+  setPersistence(auth, browserLocalPersistence).catch((err) => {
+    console.warn("Could not set browserLocalPersistence on Firebase Auth:", err);
+  });
+}
 
 // Validate Connection to Firestore on startup
 async function testConnection() {

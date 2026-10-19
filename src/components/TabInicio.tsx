@@ -29,7 +29,6 @@ interface TabInicioProps {
   proFeaturesConfig?: ProFeaturesConfig;
   isOnline?: boolean;
   isCloudActive?: boolean;
-  onOpenSyncModal?: () => void;
 }
 
 export default function TabInicio({
@@ -51,8 +50,7 @@ export default function TabInicio({
   selectedCurrency = 'USD',
   proFeaturesConfig,
   isOnline = true,
-  isCloudActive = true,
-  onOpenSyncModal
+  isCloudActive = true
 }: TabInicioProps) {
   // Compute real metrics for today (in local timezone)
   const todayStr = useMemo(() => getLocalDateString(new Date()), []);

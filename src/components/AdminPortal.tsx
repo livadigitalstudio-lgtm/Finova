@@ -14,7 +14,6 @@ import { UserSession, MonetizationPlan, ExchangeRates, AuditLog, ProFeaturesConf
 import { ratesService } from '../services/ratesService';
 import { errorManager, SystemIncident, SystemHealthReport } from '../services/errorManager';
 import appLogo from '../assets/images/finova_app_logo_1789320550545.jpg';
-import { SyncStatusBadge, SyncOfflineBanner, SyncDetailsModal } from './SyncStatusIndicator';
 
 export interface AdminPortalProps {
   currentUser: UserSession;
@@ -74,7 +73,6 @@ export default function AdminPortal({
   debtsCount = 0
 }: AdminPortalProps) {
   const [activeTab, setActiveTab] = useState<AdminTab>('inicio');
-  const [isSyncModalOpen, setIsSyncModalOpen] = useState<boolean>(false);
 
   // Notification banners
   const [bannerNotice, setBannerNotice] = useState<string | null>(null);
@@ -349,13 +347,6 @@ export default function AdminPortal({
           </button>
         </div>
       </header>
-
-      {/* Offline Alert Banner in Admin Portal */}
-      <SyncOfflineBanner
-        isOnline={isOnline}
-        reconnectedNotice={false}
-        onOpenDetails={() => setIsSyncModalOpen(true)}
-      />
 
       {/* Floating Notice Toast */}
       {bannerNotice && (
@@ -1590,50 +1581,38 @@ export default function AdminPortal({
                 </div>
               </div>
 
-              {/* Cloud Sync Diagnostic Card */}
+              {/* Data Architecture Diagnostic Card */}
               <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Database className="w-4 h-4 text-blue-600" />
                     <h3 className="text-xs font-black text-slate-900 uppercase tracking-wider">
-                      Sincronización en la Nube de Google Firebase
+                      Arquitectura de Datos & Respaldo en la Nube
                     </h3>
                   </div>
-                  <SyncStatusBadge
-                    isOnline={isOnline}
-                    isCloudActive={isCloudActive}
-                    isSyncing={isSyncing}
-                    lastSyncTime={lastSyncTime}
-                    onClick={() => setIsSyncModalOpen(true)}
-                    variant="compact"
-                  />
+                  <span className="text-[10px] font-bold px-2.5 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg">
+                    Local-First + Firebase
+                  </span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
                   <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                    <span className="text-[10px] uppercase font-bold text-slate-400 block">Estado de Red</span>
-                    <p className={`text-xs font-bold mt-0.5 ${isOnline ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {isOnline ? '🟢 En línea (Internet activo)' : '🔴 Sin conexión (Offline)'}
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block">Fuente de Verdad</span>
+                    <p className="text-xs font-bold text-slate-800 mt-0.5">
+                      IndexedDB / Dexie.js (Local)
                     </p>
                   </div>
                   <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                    <span className="text-[10px] uppercase font-bold text-slate-400 block">Última Sincronización</span>
-                    <p className="text-xs font-bold text-slate-800 mt-0.5 font-mono">
-                      {lastSyncTime ? lastSyncTime.toLocaleTimeString() : 'En tiempo real'}
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block">Respaldo de Seguridad</span>
+                    <p className="text-xs font-bold text-slate-800 mt-0.5">
+                      Google Cloud Firestore
                     </p>
                   </div>
-                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
-                    <div>
-                      <span className="text-[10px] uppercase font-bold text-slate-400 block">Inspección de Nube</span>
-                      <p className="text-xs font-bold text-blue-700 mt-0.5">Detalles y Métricas</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsSyncModalOpen(true)}
-                      className="px-3 py-1 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold cursor-pointer"
-                    >
-                      Abrir Monitor
-                    </button>
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block">Motor de Sincronización</span>
+                    <p className="text-xs font-bold text-emerald-700 mt-0.5">
+                      Segundo plano silencioso (3.5s)
+                    </p>
                   </div>
                 </div>
               </div>
@@ -1811,23 +1790,6 @@ export default function AdminPortal({
           </button>
         </div>
       </nav>
-
-      {/* Sync Details Modal for Admin Portal */}
-      <SyncDetailsModal
-        isOpen={isSyncModalOpen}
-        onClose={() => setIsSyncModalOpen(false)}
-        isOnline={isOnline}
-        isCloudActive={isCloudActive}
-        isSyncing={isSyncing}
-        lastSyncTime={lastSyncTime}
-        onForceSync={onForceSync || (async () => true)}
-        userEmail={currentUser.email}
-        itemCounts={{
-          records: recordsCount,
-          inventory: inventoryCount,
-          debts: debtsCount
-        }}
-      />
     </div>
   );
 }

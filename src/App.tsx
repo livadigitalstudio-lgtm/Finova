@@ -40,16 +40,13 @@ import { ExpenseFlowModal } from './components/ExpenseFlowModal';
 import { purgeLegacyPerfumeData } from './utils/categoryUtils';
 import { ratesService, useExchangeRates } from './services/ratesService';
 import { storageService } from './services/storageService';
-import { useNetworkSync } from './hooks/useNetworkSync';
-import { 
-  SyncStatusBadge, 
-  SyncOfflineBanner, 
-  SyncDetailsModal 
-} from './components/SyncStatusIndicator';
+import { localDb } from './db/localDb';
+import { localMigrationService } from './services/localMigrationService';
+import { backgroundSyncEngine } from './services/backgroundSyncEngine';
+import LogoutModal, { LogoutStep } from './components/LogoutModal';
 import AppLogo from './components/AppLogo';
 import FloatingInstallPrompt from './components/FloatingInstallPrompt';
 import { getLocalDateString } from './utils/dateUtils';
-import { syncQueueService } from './services/syncQueueService';
 
 // Firebase imports
 import { auth, db, isFirebaseConfigured, handleFirestoreError, OperationType } from './firebase';
@@ -149,25 +146,26 @@ export default function App() {
   // Cloud sync is active when Firebase is configured and a user session is present
   const isCloudSyncActive = Boolean(isFirebaseConfigured && (currentUser || firebaseAuthUser));
 
-  // Network connectivity & cloud sync status hook
-  const {
-    isOnline,
-    isSyncing,
-    lastSyncTime,
-    reconnectedNotice,
-    forceSyncCheck,
-    setSyncingState,
-    recordSyncSuccess,
-    dismissReconnectedNotice
-  } = useNetworkSync({
-    isCloudActive: isCloudSyncActive,
-    onSyncTrigger: async () => {
-      await refreshRates();
-    }
+  // Network connectivity state (completely automatic and silent)
+  const [isOnline, setIsOnline] = useState<boolean>(() => {
+    return typeof navigator !== 'undefined' ? navigator.onLine : true;
   });
 
-  // Modal to inspect sync details
-  const [isSyncModalOpen, setIsSyncModalOpen] = useState<boolean>(false);
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Graceful Sign-Out Routine states
+  const [isLogoutModalOpen, setIsLogoutModalOpen] = useState(false);
+  const [logoutStep, setLogoutStep] = useState<LogoutStep>('syncing');
+  const [logoutErrorMsg, setLogoutErrorMsg] = useState('');
 
   // --- Real-time Firebase Synchronization & Active User Profile Monitor ---
   useEffect(() => {
@@ -386,131 +384,70 @@ export default function App() {
 
   // Strict User Data Isolation: Reset & rehydrate whenever current user changes
   useEffect(() => {
-    if (!currentUser?.email) {
+    if (!currentUser?.email || !currentUser?.uid) {
       setRecords([]);
       setInventory([]);
       setDebts([]);
       return;
     }
     const emailKey = currentUser.email;
+    const userId = currentUser.uid;
     purgeLegacyPerfumeData(emailKey);
 
-    // Load records for this user (never keep old user records)
-    const cachedRecs = storageService.getSync<FinancialRecord[]>(`gt_records_${emailKey}`, []);
-    setRecords(cachedRecs);
-    storageService.get<FinancialRecord[]>(`gt_records_${emailKey}`, cachedRecs).then((recs) => {
-      setRecords(recs || []);
-    });
+    // Register active user in background sync engine
+    backgroundSyncEngine.setActiveUser(userId);
 
-    // Load inventory for this user
-    const rawCachedInv = storageService.getSync<InventoryItem[]>(`gt_inventory_${emailKey}`, []);
-    const cachedInv = sanitizeInventory(rawCachedInv);
-    if (cachedInv.length !== rawCachedInv.length) {
-      storageService.set(`gt_inventory_${emailKey}`, cachedInv);
-    }
-    setInventory(cachedInv);
-    storageService.get<InventoryItem[]>(`gt_inventory_${emailKey}`, cachedInv).then((inv) => {
-      const cleanInv = sanitizeInventory(inv || []);
-      if (cleanInv.length !== (inv || []).length) {
-        storageService.set(`gt_inventory_${emailKey}`, cleanInv);
+    // 1. FAST LOCAL-FIRST HYDRATION (IndexedDB Dexie as Primary Source of Truth)
+    localDb.getUserRecords(userId).then((localRecs) => {
+      if (localRecs && localRecs.length > 0) {
+        setRecords(localRecs);
+      } else {
+        const cached = storageService.getSync<FinancialRecord[]>(`gt_records_${emailKey}`, []);
+        setRecords(cached);
       }
-      setInventory(cleanInv);
     });
 
-    // Load debts for this user
-    const cachedDebts = storageService.getSync<DebtItem[]>(`gt_debts_${emailKey}`, []);
-    setDebts(cachedDebts);
-    storageService.get<DebtItem[]>(`gt_debts_${emailKey}`, cachedDebts).then((debtsList) => {
-      setDebts(debtsList || []);
-    });
-  }, [currentUser?.email]);
-
-  // Real-time Cloud Firestore synchronization of lists per UID
-  useEffect(() => {
-    if (!isCloudSyncActive || !currentUser?.uid) return;
-
-    const uId = currentUser.uid;
-    const emailKey = currentUser.email;
-
-    // 1. Live stream of financial records
-    const unsubRecords = onSnapshot(collection(db, 'users', uId, 'records'), (snap) => {
-      const list: FinancialRecord[] = [];
-      snap.forEach((doc) => {
-        list.push(doc.data() as FinancialRecord);
-      });
-      list.sort((a, b) => b.id.localeCompare(a.id));
-      setRecords(list);
-      if (emailKey) {
-        storageService.set(`gt_records_${emailKey}`, list);
+    localDb.getUserInventory(userId).then((localInv) => {
+      const cleaned = sanitizeInventory(localInv || []);
+      if (cleaned.length > 0) {
+        setInventory(cleaned);
+      } else {
+        const rawCachedInv = storageService.getSync<InventoryItem[]>(`gt_inventory_${emailKey}`, []);
+        setInventory(sanitizeInventory(rawCachedInv));
       }
-      recordSyncSuccess();
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, `users/${uId}/records`);
     });
 
-    // 2. Live stream of catalog inventory items
-    const unsubInventory = onSnapshot(collection(db, 'users', uId, 'inventory'), (snap) => {
-      const list: InventoryItem[] = [];
-      snap.forEach((doc) => {
-        list.push(doc.data() as InventoryItem);
-      });
-      const cleaned = sanitizeInventory(list);
-      // If default demo items were detected in cloud, delete them permanently
-      if (cleaned.length !== list.length) {
-        list.forEach(item => {
-          if (!cleaned.some(c => c.id === item.id)) {
-            deleteDoc(doc(db, 'users', uId, 'inventory', item.id)).catch(() => {});
-          }
-        });
+    localDb.getUserDebts(userId).then((localDebts) => {
+      if (localDebts && localDebts.length > 0) {
+        setDebts(localDebts);
+      } else {
+        const cached = storageService.getSync<DebtItem[]>(`gt_debts_${emailKey}`, []);
+        setDebts(cached);
       }
-      setInventory(cleaned);
-      if (emailKey) {
-        storageService.set(`gt_inventory_${emailKey}`, cleaned);
-      }
-      recordSyncSuccess();
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, `users/${uId}/inventory`);
     });
 
-    // 3. Live stream of accounts debts ledger
-    const unsubDebts = onSnapshot(collection(db, 'users', uId, 'debts'), (snap) => {
-      const list: DebtItem[] = [];
-      snap.forEach((doc) => {
-        list.push(doc.data() as DebtItem);
-      });
-      list.sort((a, b) => b.dateCreated.localeCompare(a.dateCreated));
-      setDebts(list);
-      if (emailKey) {
-        storageService.set(`gt_debts_${emailKey}`, list);
+    // 2. AUTOMATIC TRANSPARENT MIGRATION & DISASTER RECOVERY (Specifications 3 & 4)
+    // If user is not yet migrated to local, or local DB is empty (new phone/device),
+    // silently fetch from Firestore cloud backup, populate IndexedDB, and set flag.
+    localMigrationService.ensureUserDataReady(userId, emailKey).then((result) => {
+      if (result.migratedFromCloud) {
+        if (result.records.length > 0) setRecords(result.records);
+        if (result.inventory.length > 0) setInventory(sanitizeInventory(result.inventory));
+        if (result.debts.length > 0) setDebts(result.debts);
       }
-      recordSyncSuccess();
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, `users/${uId}/debts`);
+    }).catch((err) => {
+      console.warn("Silent migration notice:", err);
     });
+  }, [currentUser?.email, currentUser?.uid]);
 
-    return () => {
-      unsubRecords();
-      unsubInventory();
-      unsubDebts();
-    };
-  }, [isCloudSyncActive, currentUser?.uid, currentUser?.email]);
-
-  // Internal Auto-Sync Engine: Flushes offline queue automatically when internet returns
-  useEffect(() => {
-    if (isOnline && isCloudSyncActive && currentUser?.uid) {
-      syncQueueService.flush(currentUser.uid).then(({ success }) => {
-        if (success > 0) {
-          showToast(`¡Conexión restaurada! Se sincronizaron ${success} registros pendientes con la nube.`);
-        }
-      });
-    }
-  }, [isOnline, isCloudSyncActive, currentUser?.uid]);
-
-  // Persists data immediately into persistent storage so the app is always 100% functional offline
+  // Persists data immediately into local IndexedDB and memory cache (Local-First source of truth)
   const saveRecords = async (newRecs: FinancialRecord[]) => {
     setRecords(newRecs);
     if (currentUser?.email) {
       storageService.set(`gt_records_${currentUser.email}`, newRecs);
+    }
+    if (currentUser?.uid) {
+      localDb.putUserRecords(currentUser.uid, newRecs).catch(() => {});
     }
   };
 
@@ -519,12 +456,18 @@ export default function App() {
     if (currentUser?.email) {
       storageService.set(`gt_inventory_${currentUser.email}`, newInv);
     }
+    if (currentUser?.uid) {
+      localDb.putUserInventory(currentUser.uid, newInv).catch(() => {});
+    }
   };
 
   const saveDebts = async (newDebts: DebtItem[]) => {
     setDebts(newDebts);
     if (currentUser?.email) {
       storageService.set(`gt_debts_${currentUser.email}`, newDebts);
+    }
+    if (currentUser?.uid) {
+      localDb.putUserDebts(currentUser.uid, newDebts).catch(() => {});
     }
   };
 
@@ -602,17 +545,19 @@ export default function App() {
       category
     };
 
-    if (isCloudSyncActive) {
-      try {
-        await setDoc(doc(db, 'auditLogs', newLog.id), newLog);
-      } catch (err) {
-        console.error("Failed to post audit log in Firestore:", err);
-      }
-    } else {
-      setAuditLogs(prev => {
-        const updated = [newLog, ...prev];
-        localStorage.setItem('gt_audit_trail_logs', JSON.stringify(updated));
-        return updated;
+    setAuditLogs(prev => {
+      const updated = [newLog, ...prev];
+      localStorage.setItem('gt_audit_trail_logs', JSON.stringify(updated));
+      return updated;
+    });
+
+    if (currentUser?.uid) {
+      localDb.auditLogs.put({ ...newLog, userId: currentUser.uid }).catch(() => {});
+      backgroundSyncEngine.scheduleSync(currentUser.uid, {
+        collection: 'auditLogs',
+        action: 'upsert',
+        docId: newLog.id,
+        payload: newLog
       });
     }
   };
@@ -804,22 +749,84 @@ export default function App() {
     }
   }, [viewMode, currentUser?.email]);
 
+  // --- 5.1 GRACEFUL SIGN-OUT ROUTINE (Specification 6) ---
   const handleLogout = async () => {
-    if (isCloudSyncActive) {
-      try {
-        await handleAddAuditLog('Cierre sesión', `Sesión finalizada para: ${currentUser?.name || 'Usuario'}`, 'sistema');
-        await signOut(auth);
-      } catch (e) {
-        console.error("Logout failure:", e);
-      }
+    if (!currentUser?.uid) {
+      await finishLogoutAndPurge();
+      return;
     }
-    setCurrentUser(null);
-    setRecords([]);
-    setInventory([]);
-    setDebts([]);
-    localStorage.removeItem('gt_active_session');
-    setViewMode('app');
-    setIsPlansOpen(false);
+
+    setIsLogoutModalOpen(true);
+    setLogoutStep('syncing');
+    setLogoutErrorMsg('');
+
+    // Paso B: Manejo Offline
+    if (!navigator.onLine) {
+      setLogoutStep('offline_warning');
+      return;
+    }
+
+    // Paso A: Sincronización final forzada ("flush")
+    try {
+      await backgroundSyncEngine.flush(currentUser.uid);
+      // Paso C: Limpieza y Salida tras confirmar sincronización
+      await finishLogoutAndPurge();
+    } catch (err: any) {
+      console.warn("Logout sync notice:", err);
+      setLogoutStep('offline_warning');
+    }
+  };
+
+  const handleRetryLogoutSync = async () => {
+    if (!currentUser?.uid) return;
+    setLogoutStep('syncing');
+    setLogoutErrorMsg('');
+
+    if (!navigator.onLine) {
+      setTimeout(() => setLogoutStep('offline_warning'), 600);
+      return;
+    }
+
+    try {
+      await backgroundSyncEngine.flush(currentUser.uid);
+      await finishLogoutAndPurge();
+    } catch (err) {
+      console.warn("Retry logout sync error:", err);
+      setLogoutStep('offline_warning');
+    }
+  };
+
+  const handleForceLogoutWithoutSync = async () => {
+    await finishLogoutAndPurge();
+  };
+
+  const finishLogoutAndPurge = async () => {
+    try {
+      if (currentUser?.uid) {
+        // Destroy / clean local IndexedDB of this user to protect financial data privacy
+        await localDb.purgeUserData(currentUser.uid);
+        localStorage.removeItem(`is_migrated_to_local_${currentUser.uid}`);
+      }
+      if (currentUser?.email) {
+        storageService.remove(`gt_records_${currentUser.email}`);
+        storageService.remove(`gt_inventory_${currentUser.email}`);
+        storageService.remove(`gt_debts_${currentUser.email}`);
+      }
+      if (isCloudSyncActive) {
+        await signOut(auth);
+      }
+    } catch (e) {
+      console.warn("Logout cleanup note:", e);
+    } finally {
+      setIsLogoutModalOpen(false);
+      setCurrentUser(null);
+      setRecords([]);
+      setInventory([]);
+      setDebts([]);
+      localStorage.removeItem('gt_active_session');
+      setViewMode('app');
+      setIsPlansOpen(false);
+    }
   };
 
   // --- 6. DATABASE ATOMICS (ADD / REMOVE / TOGGLES) WITH OFFLINE AUTO-SYNC ---
@@ -869,34 +876,18 @@ export default function App() {
       // Save updated inventory state and local cache
       saveInventory(updatedInventory);
 
-      // Cloud / offline queue sync for each affected inventory item
-      for (const item of soldItems) {
-        const prod = updatedInventory.find(p => p.id === item.productId);
-        if (!prod) continue;
-        if (isCloudSyncActive && currentUser?.uid && isOnline) {
-          try {
-            const docRef = doc(db, 'users', currentUser.uid, 'inventory', prod.id);
-            await updateDoc(docRef, {
-              stock: prod.stock,
-              status: prod.status
-            });
-          } catch (e) {
-            syncQueueService.enqueue({
-              type: 'update_stock',
-              collectionPath: 'inventory',
+      // Silent background cloud backup for affected stock items
+      if (currentUser?.uid) {
+        for (const item of soldItems) {
+          const prod = updatedInventory.find(p => p.id === item.productId);
+          if (prod) {
+            backgroundSyncEngine.scheduleSync(currentUser.uid, {
+              collection: 'inventory',
+              action: 'upsert',
               docId: prod.id,
-              payload: { stock: prod.stock, status: prod.status },
-              userId: currentUser.uid
+              payload: prod
             });
           }
-        } else if (currentUser?.uid) {
-          syncQueueService.enqueue({
-            type: 'update_stock',
-            collectionPath: 'inventory',
-            docId: prod.id,
-            payload: { stock: prod.stock, status: prod.status },
-            userId: currentUser.uid
-          });
         }
       }
 
@@ -933,35 +924,18 @@ export default function App() {
 
       saveInventory(updatedInventory);
 
-      for (const item of purchasedItems) {
-        const prod = updatedInventory.find(p => p.id === item.productId);
-        if (!prod) continue;
-        if (isCloudSyncActive && currentUser?.uid && isOnline) {
-          try {
-            const docRef = doc(db, 'users', currentUser.uid, 'inventory', prod.id);
-            await updateDoc(docRef, {
-              stock: prod.stock,
-              cost: prod.cost,
-              costCurrency: prod.costCurrency || 'USD',
-              status: prod.status
-            });
-          } catch (e) {
-            syncQueueService.enqueue({
-              type: 'update_stock',
-              collectionPath: 'inventory',
+      // Silent background cloud backup for restocked items
+      if (currentUser?.uid) {
+        for (const item of purchasedItems) {
+          const prod = updatedInventory.find(p => p.id === item.productId);
+          if (prod) {
+            backgroundSyncEngine.scheduleSync(currentUser.uid, {
+              collection: 'inventory',
+              action: 'upsert',
               docId: prod.id,
-              payload: { stock: prod.stock, cost: prod.cost, costCurrency: prod.costCurrency || 'USD', status: prod.status },
-              userId: currentUser.uid
+              payload: prod
             });
           }
-        } else if (currentUser?.uid) {
-          syncQueueService.enqueue({
-            type: 'update_stock',
-            collectionPath: 'inventory',
-            docId: prod.id,
-            payload: { stock: prod.stock, cost: prod.cost, costCurrency: prod.costCurrency || 'USD', status: prod.status },
-            userId: currentUser.uid
-          });
         }
       }
 
@@ -982,27 +956,13 @@ export default function App() {
       );
     }
 
-    // 3. Direct cloud sync of record if online, or enqueue for automatic sync upon reconnection
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        await setDoc(doc(db, 'users', currentUser.uid, 'records', recordId), fullRec);
-      } catch (e) {
-        console.warn("Could not sync record immediately, enqueuing:", e);
-        syncQueueService.enqueue({
-          type: 'set_record',
-          collectionPath: 'records',
-          docId: recordId,
-          payload: fullRec,
-          userId: currentUser.uid
-        });
-      }
-    } else if (currentUser?.uid) {
-      syncQueueService.enqueue({
-        type: 'set_record',
-        collectionPath: 'records',
+    // 3. Silent background cloud backup of financial record
+    if (currentUser?.uid) {
+      backgroundSyncEngine.scheduleSync(currentUser.uid, {
+        collection: 'records',
+        action: 'upsert',
         docId: recordId,
-        payload: fullRec,
-        userId: currentUser.uid
+        payload: fullRec
       });
     }
   };
@@ -1068,29 +1028,13 @@ export default function App() {
     if (touchedProducts.length > 0) {
       saveInventory(updatedInventory);
 
-      for (const prod of touchedProducts) {
-        if (isCloudSyncActive && currentUser?.uid && isOnline) {
-          try {
-            await updateDoc(doc(db, 'users', currentUser.uid, 'inventory', prod.id), {
-              stock: prod.stock,
-              status: prod.status
-            });
-          } catch (e) {
-            syncQueueService.enqueue({
-              type: 'update_stock',
-              collectionPath: 'inventory',
-              docId: prod.id,
-              payload: { stock: prod.stock, status: prod.status },
-              userId: currentUser.uid
-            });
-          }
-        } else if (currentUser?.uid) {
-          syncQueueService.enqueue({
-            type: 'update_stock',
-            collectionPath: 'inventory',
+      if (currentUser?.uid) {
+        for (const prod of touchedProducts) {
+          backgroundSyncEngine.scheduleSync(currentUser.uid, {
+            collection: 'inventory',
+            action: 'upsert',
             docId: prod.id,
-            payload: { stock: prod.stock, status: prod.status },
-            userId: currentUser.uid
+            payload: prod
           });
         }
       }
@@ -1122,24 +1066,12 @@ export default function App() {
       touchedProducts.length > 0 ? 'inventario' : 'finanzas'
     );
 
-    // Cloud sync for records deletion
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        await deleteDoc(doc(db, 'users', currentUser.uid, 'records', id));
-      } catch (e) {
-        syncQueueService.enqueue({
-          type: 'delete_record',
-          collectionPath: 'records',
-          docId: id,
-          userId: currentUser.uid
-        });
-      }
-    } else if (currentUser?.uid) {
-      syncQueueService.enqueue({
-        type: 'delete_record',
-        collectionPath: 'records',
-        docId: id,
-        userId: currentUser.uid
+    // Silent background cloud sync for records deletion
+    if (currentUser?.uid) {
+      backgroundSyncEngine.scheduleSync(currentUser.uid, {
+        collection: 'records',
+        action: 'delete',
+        docId: id
       });
     }
   };
@@ -1171,35 +1103,17 @@ export default function App() {
 
     saveInventory(updatedInventory);
 
-    for (const item of purchasedItems) {
-      const prod = updatedInventory.find(p => p.id === item.productId);
-      if (!prod) continue;
-      if (isCloudSyncActive && currentUser?.uid && isOnline) {
-        try {
-          const docRef = doc(db, 'users', currentUser.uid, 'inventory', prod.id);
-          await updateDoc(docRef, {
-            stock: prod.stock,
-            cost: prod.cost,
-            costCurrency: prod.costCurrency || 'USD',
-            status: prod.status
-          });
-        } catch (e) {
-          syncQueueService.enqueue({
-            type: 'update_stock',
-            collectionPath: 'inventory',
+    if (currentUser?.uid) {
+      for (const item of purchasedItems) {
+        const prod = updatedInventory.find(p => p.id === item.productId);
+        if (prod) {
+          backgroundSyncEngine.scheduleSync(currentUser.uid, {
+            collection: 'inventory',
+            action: 'upsert',
             docId: prod.id,
-            payload: { stock: prod.stock, cost: prod.cost, costCurrency: prod.costCurrency || 'USD', status: prod.status },
-            userId: currentUser.uid
+            payload: prod
           });
         }
-      } else if (currentUser?.uid) {
-        syncQueueService.enqueue({
-          type: 'update_stock',
-          collectionPath: 'inventory',
-          docId: prod.id,
-          payload: { stock: prod.stock, cost: prod.cost, costCurrency: prod.costCurrency || 'USD', status: prod.status },
-          userId: currentUser.uid
-        });
       }
     }
 
@@ -1237,25 +1151,12 @@ export default function App() {
       'inventario'
     );
 
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        await setDoc(doc(db, 'users', currentUser.uid, 'inventory', prodId), fullItem);
-      } catch (e) {
-        syncQueueService.enqueue({
-          type: 'set_product',
-          collectionPath: 'inventory',
-          docId: prodId,
-          payload: fullItem,
-          userId: currentUser.uid
-        });
-      }
-    } else if (currentUser?.uid) {
-      syncQueueService.enqueue({
-        type: 'set_product',
-        collectionPath: 'inventory',
+    if (currentUser?.uid) {
+      backgroundSyncEngine.scheduleSync(currentUser.uid, {
+        collection: 'inventory',
+        action: 'upsert',
         docId: prodId,
-        payload: fullItem,
-        userId: currentUser.uid
+        payload: fullItem
       });
     }
 
@@ -1277,23 +1178,11 @@ export default function App() {
       );
     }
 
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        await deleteDoc(doc(db, 'users', currentUser.uid, 'inventory', id));
-      } catch (e) {
-        syncQueueService.enqueue({
-          type: 'delete_product',
-          collectionPath: 'inventory',
-          docId: id,
-          userId: currentUser.uid
-        });
-      }
-    } else if (currentUser?.uid) {
-      syncQueueService.enqueue({
-        type: 'delete_product',
-        collectionPath: 'inventory',
-        docId: id,
-        userId: currentUser.uid
+    if (currentUser?.uid) {
+      backgroundSyncEngine.scheduleSync(currentUser.uid, {
+        collection: 'inventory',
+        action: 'delete',
+        docId: id
       });
     }
   };
@@ -1321,30 +1210,16 @@ export default function App() {
       );
     }
 
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        const docRef = doc(db, 'users', currentUser.uid, 'inventory', id);
-        await updateDoc(docRef, {
-          stock: newStock,
-          status: newStock > 0 ? 'disponible' : 'no_disponible'
-        });
-      } catch (e) {
-        syncQueueService.enqueue({
-          type: 'update_stock',
-          collectionPath: 'inventory',
+    if (currentUser?.uid) {
+      const prod = updated.find(item => item.id === id);
+      if (prod) {
+        backgroundSyncEngine.scheduleSync(currentUser.uid, {
+          collection: 'inventory',
+          action: 'upsert',
           docId: id,
-          payload: { stock: newStock },
-          userId: currentUser.uid
+          payload: prod
         });
       }
-    } else if (currentUser?.uid) {
-      syncQueueService.enqueue({
-        type: 'update_stock',
-        collectionPath: 'inventory',
-        docId: id,
-        payload: { stock: newStock },
-        userId: currentUser.uid
-      });
     }
   };
 
@@ -1373,28 +1248,12 @@ export default function App() {
     }
 
     const updatedItem = updated.find(i => i.id === id);
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        const docRef = doc(db, 'users', currentUser.uid, 'inventory', id);
-        await updateDoc(docRef, fields);
-      } catch (e) {
-        if (updatedItem) {
-          syncQueueService.enqueue({
-            type: 'set_product',
-            collectionPath: 'inventory',
-            docId: id,
-            payload: updatedItem,
-            userId: currentUser.uid
-          });
-        }
-      }
-    } else if (currentUser?.uid && updatedItem) {
-      syncQueueService.enqueue({
-        type: 'set_product',
-        collectionPath: 'inventory',
+    if (currentUser?.uid && updatedItem) {
+      backgroundSyncEngine.scheduleSync(currentUser.uid, {
+        collection: 'inventory',
+        action: 'upsert',
         docId: id,
-        payload: updatedItem,
-        userId: currentUser.uid
+        payload: updatedItem
       });
     }
   };
@@ -1418,25 +1277,12 @@ export default function App() {
       'deudas'
     );
 
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        await setDoc(doc(db, 'users', currentUser.uid, 'debts', debtId), fullDebt);
-      } catch (e) {
-        syncQueueService.enqueue({
-          type: 'set_debt',
-          collectionPath: 'debts',
-          docId: debtId,
-          payload: fullDebt,
-          userId: currentUser.uid
-        });
-      }
-    } else if (currentUser?.uid) {
-      syncQueueService.enqueue({
-        type: 'set_debt',
-        collectionPath: 'debts',
+    if (currentUser?.uid) {
+      backgroundSyncEngine.scheduleSync(currentUser.uid, {
+        collection: 'debts',
+        action: 'upsert',
         docId: debtId,
-        payload: fullDebt,
-        userId: currentUser.uid
+        payload: fullDebt
       });
     }
   };
@@ -1456,23 +1302,11 @@ export default function App() {
       );
     }
 
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        await deleteDoc(doc(db, 'users', currentUser.uid, 'debts', id));
-      } catch (e) {
-        syncQueueService.enqueue({
-          type: 'delete_debt',
-          collectionPath: 'debts',
-          docId: id,
-          userId: currentUser.uid
-        });
-      }
-    } else if (currentUser?.uid) {
-      syncQueueService.enqueue({
-        type: 'delete_debt',
-        collectionPath: 'debts',
-        docId: id,
-        userId: currentUser.uid
+    if (currentUser?.uid) {
+      backgroundSyncEngine.scheduleSync(currentUser.uid, {
+        collection: 'debts',
+        action: 'delete',
+        docId: id
       });
     }
   };
@@ -1541,30 +1375,16 @@ export default function App() {
       showToast('Estatus de la deuda revertido a pendiente.');
     }
 
-    const payload = !wasPaid
-      ? { status: 'pagado', paidAmount: target.amount, remainingAmount: 0, paidAt: getLocalDateString() }
-      : { status: 'pendiente', paidAmount: 0, remainingAmount: target.amount, paidAt: null };
-
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        await updateDoc(doc(db, 'users', currentUser.uid, 'debts', id), payload);
-      } catch (e) {
-        syncQueueService.enqueue({
-          type: 'set_debt',
-          collectionPath: 'debts',
+    if (currentUser?.uid) {
+      const updatedItem = updated.find(d => d.id === id);
+      if (updatedItem) {
+        backgroundSyncEngine.scheduleSync(currentUser.uid, {
+          collection: 'debts',
+          action: 'upsert',
           docId: id,
-          payload,
-          userId: currentUser.uid
+          payload: updatedItem
         });
       }
-    } else if (currentUser?.uid) {
-      syncQueueService.enqueue({
-        type: 'set_debt',
-        collectionPath: 'debts',
-        docId: id,
-        payload,
-        userId: currentUser.uid
-      });
     }
   };
 
@@ -1635,25 +1455,12 @@ export default function App() {
       'deudas'
     );
 
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        await setDoc(doc(db, 'users', currentUser.uid, 'debts', debtId), updatedDebt, { merge: true });
-      } catch (e) {
-        syncQueueService.enqueue({
-          type: 'set_debt',
-          collectionPath: 'debts',
-          docId: debtId,
-          payload: updatedDebt,
-          userId: currentUser.uid
-        });
-      }
-    } else if (currentUser?.uid) {
-      syncQueueService.enqueue({
-        type: 'set_debt',
-        collectionPath: 'debts',
+    if (currentUser?.uid) {
+      backgroundSyncEngine.scheduleSync(currentUser.uid, {
+        collection: 'debts',
+        action: 'upsert',
         docId: debtId,
-        payload: updatedDebt,
-        userId: currentUser.uid
+        payload: updatedDebt
       });
     }
   };
@@ -1667,25 +1474,12 @@ export default function App() {
     const updated = debts.map(d => d.id === debtId ? updatedDebt : d);
     saveDebts(updated);
 
-    if (isCloudSyncActive && currentUser?.uid && isOnline) {
-      try {
-        await setDoc(doc(db, 'users', currentUser.uid, 'debts', debtId), updatedDebt, { merge: true });
-      } catch (e) {
-        syncQueueService.enqueue({
-          type: 'set_debt',
-          collectionPath: 'debts',
-          docId: debtId,
-          payload: updatedDebt,
-          userId: currentUser.uid
-        });
-      }
-    } else if (currentUser?.uid) {
-      syncQueueService.enqueue({
-        type: 'set_debt',
-        collectionPath: 'debts',
+    if (currentUser?.uid) {
+      backgroundSyncEngine.scheduleSync(currentUser.uid, {
+        collection: 'debts',
+        action: 'upsert',
         docId: debtId,
-        payload: updatedDebt,
-        userId: currentUser.uid
+        payload: updatedDebt
       });
     }
   };
@@ -1958,9 +1752,6 @@ export default function App() {
         onUpdateProConfig={handleUpdateProConfig}
         isOnline={isOnline}
         isCloudActive={isCloudSyncActive}
-        isSyncing={isSyncing}
-        lastSyncTime={lastSyncTime}
-        onForceSync={forceSyncCheck}
         recordsCount={records.length}
         inventoryCount={inventory.length}
         debtsCount={debts.length}
@@ -2034,7 +1825,6 @@ export default function App() {
             proFeaturesConfig={proFeaturesConfig}
             isOnline={isOnline}
             isCloudActive={isCloudSyncActive}
-            onOpenSyncModal={() => setIsSyncModalOpen(true)}
           />
         );
       case 'balance':
@@ -2244,16 +2034,6 @@ export default function App() {
           </div>
         </header>
 
-        {/* Real-time Network / Offline Banner Alert (Mobile) */}
-        <div className="md:hidden">
-          <SyncOfflineBanner
-            isOnline={isOnline}
-            reconnectedNotice={reconnectedNotice}
-            onOpenDetails={() => setIsSyncModalOpen(true)}
-            onDismissReconnected={dismissReconnectedNotice}
-          />
-        </div>
-
         {/* --- DESKTOP / PC HEADER (Cross-platform responsive design with Currency Selector) --- */}
         <header className="hidden md:flex shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-6 py-3 items-center justify-between z-35 shadow-xs">
           {/* Left: Store identity & role */}
@@ -2305,16 +2085,6 @@ export default function App() {
 
           {/* Right: Currency Toggle & Quick actions */}
           <div className="flex items-center gap-2.5">
-            {/* Visual Cloud Sync Indicator */}
-            <SyncStatusBadge
-              isOnline={isOnline}
-              isCloudActive={isCloudSyncActive}
-              isSyncing={isSyncing}
-              lastSyncTime={lastSyncTime}
-              onClick={() => setIsSyncModalOpen(true)}
-              variant="desktop"
-            />
-
             {/* Currency Selector Pill */}
             <div className="flex items-center bg-slate-100 p-0.5 rounded-xl border border-slate-200">
               <button
@@ -2393,16 +2163,6 @@ export default function App() {
             </button>
           </div>
         </header>
-
-        {/* Real-time Network / Offline Banner Alert (Desktop) */}
-        <div className="hidden md:block">
-          <SyncOfflineBanner
-            isOnline={isOnline}
-            reconnectedNotice={reconnectedNotice}
-            onOpenDetails={() => setIsSyncModalOpen(true)}
-            onDismissReconnected={dismissReconnectedNotice}
-          />
-        </div>
 
         {/* --- DESKTOP NAVIGATION TABS BAR (Visible on PC / Desktop >= md) --- */}
         <div className="hidden md:flex bg-white border-b border-slate-200/80 px-6 py-2 items-center justify-between">
@@ -2878,21 +2638,14 @@ export default function App() {
         currentUserEmail={currentUser?.email}
       />
 
-      {/* E. Detailed Cloud Synchronization & Backup Modal */}
-      <SyncDetailsModal
-        isOpen={isSyncModalOpen}
-        onClose={() => setIsSyncModalOpen(false)}
-        isOnline={isOnline}
-        isCloudActive={isCloudSyncActive}
-        isSyncing={isSyncing}
-        lastSyncTime={lastSyncTime}
-        onForceSync={forceSyncCheck}
-        userEmail={currentUser.email}
-        itemCounts={{
-          records: records.length,
-          inventory: inventory.length,
-          debts: debts.length
-        }}
+      {/* E. Graceful Sign-Out Routine Modal (Specification 6) */}
+      <LogoutModal
+        isOpen={isLogoutModalOpen}
+        step={logoutStep}
+        onRetry={handleRetryLogoutSync}
+        onForceLogout={handleForceLogoutWithoutSync}
+        onCancel={() => setIsLogoutModalOpen(false)}
+        errorMessage={logoutErrorMsg}
       />
 
       {/* Floating PWA Install Prompt */}
