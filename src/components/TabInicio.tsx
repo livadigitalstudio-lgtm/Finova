@@ -29,6 +29,7 @@ interface TabInicioProps {
   proFeaturesConfig?: ProFeaturesConfig;
   isOnline?: boolean;
   isCloudActive?: boolean;
+  onOpenVoiceAssistant?: () => void;
 }
 
 export default function TabInicio({
@@ -50,7 +51,8 @@ export default function TabInicio({
   selectedCurrency = 'USD',
   proFeaturesConfig,
   isOnline = true,
-  isCloudActive = true
+  isCloudActive = true,
+  onOpenVoiceAssistant
 }: TabInicioProps) {
   // Compute real metrics for today (in local timezone)
   const todayStr = useMemo(() => getLocalDateString(new Date()), []);
@@ -201,13 +203,20 @@ export default function TabInicio({
       </div>
 
       {/* 2. SECTION: "Descubre todo lo que puedes hacer" */}
-      <div className="space-y-2.5">
-        <h3 className="text-sm sm:text-base font-bold text-slate-900 tracking-tight">
-          Descubre todo lo que puedes hacer
-        </h3>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm sm:text-base font-bold text-slate-900 tracking-tight">
+            Descubre todo lo que puedes hacer
+          </h3>
+          <span className="text-[10px] sm:text-[11px] font-bold text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-full border border-amber-200/60 flex items-center gap-1 shadow-2xs">
+            <Sparkles className="w-3 h-3 text-amber-500 fill-amber-500" />
+            <span>Herramientas Pro</span>
+          </span>
+        </div>
 
+        {/* 1st ROW: The 4 core tools (Clientes, Deudas, Cotizaciones, Estadísticas) */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {/* Card 1: Clientes (Requested rename from Catálogo Virtual) */}
+          {/* Card 1: Clientes */}
           <motion.button
             whileHover={{ y: -3 }}
             whileTap={{ scale: 0.97 }}
@@ -327,6 +336,49 @@ export default function TabInicio({
             </div>
           </motion.button>
         </div>
+
+        {/* 2nd ROW (PLACED UNDERNEATH / DE ÚLTIMO): FINOVA AI ASISTENTE INTELIGENTE */}
+        {onOpenVoiceAssistant && (
+          <motion.div
+            whileHover={{ scale: 1.01 }}
+            whileTap={{ scale: 0.99 }}
+            onClick={onOpenVoiceAssistant}
+            className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-950 via-[#0a0f1d] to-slate-900 p-4 sm:p-5 text-white border border-blue-500/30 shadow-md cursor-pointer group"
+          >
+            {/* Ambient decorative glowing halo in Gemini colors */}
+            <div className="absolute right-0 top-0 w-56 h-56 bg-gradient-to-br from-blue-500/20 via-cyan-500/20 to-amber-500/20 rounded-full blur-2xl pointer-events-none" />
+
+            <div className="flex items-center justify-between relative z-10 gap-3">
+              <div className="flex items-center gap-3.5">
+                {/* Gemini 4-Point Multi-Color Sparkle Avatar */}
+                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-blue-600 via-indigo-600 to-amber-500 p-0.5 shadow-lg flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+                  <div className="w-full h-full bg-[#0d121f] rounded-[14px] flex items-center justify-center">
+                    <Sparkles className="w-6 h-6 text-amber-400 fill-amber-400 animate-pulse" />
+                  </div>
+                </div>
+
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs sm:text-sm font-black text-white tracking-tight flex items-center gap-1.5">
+                      <span>Finova AI • Asistente Inteligente</span>
+                    </span>
+                    <span className="text-[10px] font-black uppercase tracking-wider bg-gradient-to-r from-blue-500 via-indigo-500 to-amber-400 text-white px-2 py-0.5 rounded-full shadow-xs">
+                      Control Total
+                    </span>
+                  </div>
+                  <p className="text-[11px] sm:text-xs text-slate-300">
+                    Interactúa por voz o chat: registra ventas, clientes, deudas, pérdidas y consultas de negocio.
+                  </p>
+                </div>
+              </div>
+
+              <div className="shrink-0 flex items-center gap-1.5 text-xs font-black text-slate-950 bg-gradient-to-r from-amber-400 to-amber-300 hover:from-amber-300 hover:to-amber-200 px-3.5 py-2 rounded-xl group-hover:scale-105 shadow-md transition-all">
+                <span>Abrir Chat</span>
+                <ChevronRight className="w-4 h-4 stroke-[2.5]" />
+              </div>
+            </div>
+          </motion.div>
+        )}
       </div>
 
       {/* 3. PROMOTIONAL BANNER */}

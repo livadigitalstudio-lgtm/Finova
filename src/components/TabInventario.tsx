@@ -3,16 +3,21 @@ import {
   Download, Plus, Search, Tag, Eye, Info, Trash2, Edit2, 
   Check, ChevronDown, Sliders, Box, AlertTriangle, Crown, Sparkles, 
   TrendingUp, ArrowRight, Package, DollarSign, RefreshCw, X, ShoppingBag,
-  Receipt, Calendar
+  Receipt, Calendar, FileDown, Database
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { InventoryItem, ExchangeRates, FinancialRecord, ProductCurrency } from '../types';
+import { InventoryItem, ExchangeRates, FinancialRecord, ProductCurrency, DebtItem } from '../types';
+import { Client } from './SuggestedClients';
 import { formatMoney, CurrencyCode, formatRecordDisplay, convertAmount, getProductProfitMetrics, getCurrencySymbol, getCurrencyLabel } from '../utils/currency';
 import { isForbiddenCategory } from '../utils/categoryUtils';
+import ExportFullAppModal from './ExportFullAppModal';
 
 interface TabInventarioProps {
   inventory: InventoryItem[];
   records?: FinancialRecord[];
+  debts?: DebtItem[];
+  clients?: Client[];
+  companyName?: string;
   onDeleteRecord?: (id: string, options?: { revertInventory?: boolean }) => void;
   onAddProduct: (item: Omit<InventoryItem, 'id'>) => void;
   onDeleteProduct: (id: string) => void;
@@ -29,6 +34,9 @@ interface TabInventarioProps {
 export default function TabInventario({
   inventory,
   records = [],
+  debts = [],
+  clients = [],
+  companyName,
   onDeleteRecord,
   onAddProduct,
   onDeleteProduct,
@@ -60,6 +68,9 @@ export default function TabInventario({
   const [showPurchasesHistoryModal, setShowPurchasesHistoryModal] = useState(false);
   const [purchaseToDelete, setPurchaseToDelete] = useState<FinancialRecord | null>(null);
   const [revertStockOnPurchaseDelete, setRevertStockOnPurchaseDelete] = useState(true);
+
+  // Full app data export modal state
+  const [showExportModal, setShowExportModal] = useState(false);
 
   // Purchases records affecting inventory
   const purchaseRecords = useMemo(() => {
@@ -251,12 +262,23 @@ export default function TabInventario({
           <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap justify-end">
             <button
               type="button"
+              onClick={() => setShowExportModal(true)}
+              className="px-2.5 sm:px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/90 rounded-xl text-xs font-black flex items-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95"
+              title="Descargar toda la información de la app (PDF Completo e Histórico)"
+            >
+              <FileDown className="w-3.5 h-3.5 text-indigo-600" />
+              <span className="hidden sm:inline">Descargar Datos (PDF)</span>
+              <span className="sm:hidden">Descargar</span>
+            </button>
+
+            <button
+              type="button"
               onClick={triggerPDFDownload}
               className="px-2.5 sm:px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer"
-              title="Descargar reporte en CSV"
+              title="Descargar reporte rápido en CSV"
             >
               <Download className="w-3.5 h-3.5 text-slate-600" />
-              <span className="hidden sm:inline">Exportar CSV</span>
+              <span className="hidden sm:inline">CSV</span>
             </button>
 
             <button
@@ -1193,6 +1215,21 @@ export default function TabInventario({
           </motion.div>
         </div>
       )}
+
+      {/* Full App Data Export Modal (Exhaustive PDF & JSON) */}
+      <ExportFullAppModal
+        isOpen={showExportModal}
+        onClose={() => setShowExportModal(false)}
+        inventory={inventory}
+        records={records}
+        debts={debts}
+        clients={clients}
+        rates={rates}
+        selectedCurrency={selectedCurrency}
+        companyName={companyName}
+        userEmail={userEmail}
+        onNotify={triggerNotification}
+      />
     </div>
   );
 }

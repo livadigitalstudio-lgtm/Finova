@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   Settings, HelpCircle, Search, Info, LogOut, RefreshCw, 
   Trash2, Sliders, ChevronRight, Crown, Sparkles, ShieldAlert,
@@ -16,7 +16,7 @@ import {
 import { 
   INITIAL_RATES, INITIAL_PLANS 
 } from './data/defaultData';
-import { CurrencyCode } from './utils/currency';
+import { CurrencyCode, getRecordAmountInCurrency } from './utils/currency';
 import { getDebtRemainingAmount, getDebtPaidAmount } from './utils/debtUtils';
 
 // Imports modular components
@@ -46,7 +46,8 @@ import { backgroundSyncEngine } from './services/backgroundSyncEngine';
 import LogoutModal, { LogoutStep } from './components/LogoutModal';
 import AppLogo from './components/AppLogo';
 import FloatingInstallPrompt from './components/FloatingInstallPrompt';
-import { getLocalDateString } from './utils/dateUtils';
+import VoiceAssistantModal from './components/VoiceAssistantModal';
+import { getLocalDateString, parseDateSafe } from './utils/dateUtils';
 
 // Firebase imports
 import { auth, db, isFirebaseConfigured, handleFirestoreError, OperationType } from './firebase';
@@ -580,6 +581,95 @@ export default function App() {
   const [isExpenseOpen, setIsExpenseOpen] = useState(false);
   const [isCreateProductOpen, setIsCreateProductOpen] = useState(false);
   const [isCreateDebtOpen, setIsCreateDebtOpen] = useState(false);
+  const [isVoiceAssistantOpen, setIsVoiceAssistantOpen] = useState(false);
+
+  // Real-time assistant financial metrics
+  const todayStr = useMemo(() => getLocalDateString(new Date()), []);
+  const { assistantTodaySales, assistantTodayExpenses, assistantTodayBalance, assistantTotalInventoryValue } = useMemo(() => {
+    const todayRecs = records.filter(r => parseDateSafe(r.date).formatted === todayStr);
+    const sales = todayRecs
+      .filter(r => r.type === 'ingreso')
+      .reduce((sum, r) => sum + getRecordAmountInCurrency(r, selectedCurrency, exchangeRates), 0);
+    const expenses = todayRecs
+      .filter(r => r.type === 'egreso')
+      .reduce((sum, r) => sum + getRecordAmountInCurrency(r, selectedCurrency, exchangeRates), 0);
+    const balance = sales - expenses;
+
+    const bcvUsd = exchangeRates?.bcvUsd && exchangeRates.bcvUsd > 0 ? exchangeRates.bcvUsd : 832.49;
+    const bcvEur = exchangeRates?.bcvEur && exchangeRates.bcvEur > 0 ? exchangeRates.bcvEur : 968.07;
+    const invValue = inventory.reduce((sum, item) => {
+      const itemCur = item.currency || 'USD';
+      let itemVal = (item.stock || 0) * (item.price || 0);
+      if (itemCur !== selectedCurrency) {
+        if (selectedCurrency === 'EUR' && bcvUsd > 0 && bcvEur > 0) {
+          itemVal = (itemVal * bcvUsd) / bcvEur;
+        } else if (selectedCurrency === 'USD' && bcvUsd > 0 && bcvEur > 0) {
+          itemVal = (itemVal * bcvEur) / bcvUsd;
+        }
+      }
+      return sum + itemVal;
+    }, 0);
+
+    return {
+      assistantTodaySales: sales,
+      assistantTodayExpenses: expenses,
+      assistantTodayBalance: balance,
+      assistantTotalInventoryValue: invValue
+    };
+  }, [records, todayStr, inventory, selectedCurrency, exchangeRates]);
+
+  // Clients state for Voice Assistant & App integration
+  const [clientsList, setClientsList] = useState<any[]>(() => {
+    try {
+      if (currentUser?.email) {
+        return storageService.getSync<any[]>(`gt_clients_${currentUser.email}`, []) || [];
+      }
+    } catch {}
+    return [];
+  });
+
+  useEffect(() => {
+    if (currentUser?.email) {
+      const stored = storageService.getSync<any[]>(`gt_clients_${currentUser.email}`, []) || [];
+      setClientsList(stored);
+    }
+  }, [currentUser?.email]);
+
+  const handleAddNewClient = useCallback((clientData: { name: string; phone?: string; location?: string; notes?: string }) => {
+    if (!currentUser?.email) return;
+    const storageKey = `gt_clients_${currentUser.email}`;
+    const existing = storageService.getSync<any[]>(storageKey, []) || [];
+    const newClient = {
+      id: `client_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      name: clientData.name,
+      phone: clientData.phone || '',
+      location: clientData.location || '',
+      notes: clientData.notes || 'Registrado por asistente Finova AI',
+      balanceUsd: 0,
+    };
+    const updated = [newClient, ...existing];
+    storageService.set(storageKey, updated);
+    setClientsList(updated);
+  }, [currentUser?.email]);
+
+  const handleDeleteClient = useCallback((clientNameOrId: string): boolean => {
+    if (!currentUser?.email) return false;
+    const storageKey = `gt_clients_${currentUser.email}`;
+    const existing = storageService.getSync<any[]>(storageKey, []) || [];
+    const cleanTarget = clientNameOrId.trim().toLowerCase();
+    const target = existing.find(c => 
+      c.id === clientNameOrId || 
+      (c.name && c.name.toLowerCase() === cleanTarget) || 
+      (c.name && c.name.toLowerCase().includes(cleanTarget)) ||
+      (cleanTarget && c.name && cleanTarget.includes(c.name.toLowerCase()))
+    );
+    if (!target) return false;
+    const updated = existing.filter(c => c.id !== target.id);
+    storageService.set(storageKey, updated);
+    setClientsList(updated);
+    showToast(`Cliente "${target.name}" eliminado del directorio.`);
+    return true;
+  }, [currentUser?.email]);
 
   // Active notifications or alert systems
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -1465,6 +1555,107 @@ export default function App() {
     }
   };
 
+  // Apply consolidated installment (Abono) across all pending debts of a client in waterfall
+  const handleApplyClientPayment = async (
+    clientName: string,
+    payment: Omit<DebtPayment, 'id'>,
+    registerAsIncome: boolean
+  ) => {
+    const cleanTarget = clientName.trim().toLowerCase();
+    const clientPendingDebts = debts.filter(d => 
+      d.status === 'pendiente' && 
+      d.debtorName && 
+      d.debtorName.trim().toLowerCase() === cleanTarget
+    ).sort((a, b) => new Date(a.dateCreated || a.dueDate || 0).getTime() - new Date(b.dateCreated || b.dueDate || 0).getTime());
+
+    if (clientPendingDebts.length === 0) {
+      showToast(`No se encontraron deudas pendientes activas para "${clientName}".`);
+      return;
+    }
+
+    let remainingPayment = Number(payment.amount.toFixed(2));
+    let updatedDebtsList = [...debts];
+    const touchedDebts: DebtItem[] = [];
+
+    for (const d of clientPendingDebts) {
+      if (remainingPayment <= 0.0001) break;
+
+      const dPrevPaid = getDebtPaidAmount(d);
+      const dRemaining = Math.max(0, Number((d.amount - dPrevPaid).toFixed(2)));
+      if (dRemaining <= 0) continue;
+
+      const payThisDebt = Math.min(remainingPayment, dRemaining);
+      const newPaid = Number((dPrevPaid + payThisDebt).toFixed(2));
+      const newRemaining = Math.max(0, Number((d.amount - newPaid).toFixed(2)));
+      const isNowPaid = newRemaining <= 0.001;
+
+      const debtPayRecord: DebtPayment = {
+        ...payment,
+        id: `pay-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        amount: payThisDebt
+      };
+
+      const updatedD: DebtItem = {
+        ...d,
+        paidAmount: newPaid,
+        remainingAmount: newRemaining,
+        status: isNowPaid ? 'pagado' : 'pendiente',
+        paidAt: isNowPaid ? getLocalDateString() : d.paidAt,
+        payments: [debtPayRecord, ...(d.payments || [])]
+      };
+
+      updatedDebtsList = updatedDebtsList.map(item => item.id === d.id ? updatedD : item);
+      touchedDebts.push(updatedD);
+      remainingPayment = Number((remainingPayment - payThisDebt).toFixed(2));
+    }
+
+    saveDebts(updatedDebtsList);
+
+    if (registerAsIncome && payment.amount > 0) {
+      const isPorCobrar = clientPendingDebts[0].type === 'por_cobrar';
+      const calculatedType = isPorCobrar ? 'ingreso' : 'egreso';
+      const recordRate = payment.exchangeRateUsed || exchangeRates.bcvUsd;
+      const recordBs = payment.amountBs || parseFloat((payment.amount * recordRate).toFixed(2));
+      const recordDesc = `Abono de cliente ${clientName}: ${payment.paymentMethod}${payment.reference ? ` (Ref: ${payment.reference})` : ''}`;
+
+      await handleAddNewRecord({
+        type: calculatedType,
+        amount: payment.amount,
+        amountBs: recordBs,
+        exchangeRateUsed: recordRate,
+        description: recordDesc,
+        category: calculatedType === 'ingreso' ? 'Cobro de Deuda' : 'Pago de Deuda',
+        date: payment.date || getLocalDateString(),
+        paymentMethod: payment.paymentMethod,
+        currency: payment.currency || clientPendingDebts[0].currency || 'USD'
+      });
+    }
+
+    if (currentUser?.uid) {
+      for (const td of touchedDebts) {
+        backgroundSyncEngine.scheduleSync(currentUser.uid, {
+          collection: 'debts',
+          action: 'upsert',
+          docId: td.id,
+          payload: td
+        });
+      }
+    }
+
+    // Calculate new total remaining for this client
+    const newTotalRemaining = updatedDebtsList
+      .filter(d => d.status === 'pendiente' && d.debtorName && d.debtorName.trim().toLowerCase() === cleanTarget)
+      .reduce((sum, d) => sum + getDebtRemainingAmount(d), 0);
+
+    showToast(`¡Abono de $${payment.amount} registrado para "${clientName}"! Saldo pendiente: $${newTotalRemaining.toFixed(2)}`);
+
+    handleAddAuditLog(
+      'Abono consolidado a cliente',
+      `Se abonaron $${payment.amount} a las deudas de "${clientName}". Saldo restante: $${newTotalRemaining.toFixed(2)}`,
+      'deudas'
+    );
+  };
+
   // Update debt fields (e.g. client phone, client ID, notes)
   const handleUpdateDebt = async (debtId: string, updates: Partial<DebtItem>) => {
     const target = debts.find(d => d.id === debtId);
@@ -1483,6 +1674,73 @@ export default function App() {
       });
     }
   };
+
+  // Give solvency to a client (mark all pending debts as paid and settle client balance)
+  const handleSettleClientDebts = useCallback(async (clientName: string) => {
+    const cleanQuery = clientName.trim().toLowerCase();
+    if (!cleanQuery) return { settledCount: 0, totalAmount: 0 };
+
+    let totalAmountSettled = 0;
+    let settledCount = 0;
+    const nowLocalDate = getLocalDateString();
+
+    const updatedDebts = debts.map(d => {
+      const match = d.debtorName && d.debtorName.toLowerCase().includes(cleanQuery);
+      if (match && d.status === 'pendiente') {
+        const remaining = getDebtRemainingAmount(d);
+        totalAmountSettled += remaining > 0 ? remaining : d.amount;
+        settledCount++;
+        return {
+          ...d,
+          status: 'pagado' as const,
+          paidAmount: d.amount,
+          remainingAmount: 0,
+          paidAt: nowLocalDate,
+        };
+      }
+      return d;
+    });
+
+    if (settledCount > 0) {
+      saveDebts(updatedDebts);
+
+      // Update client balance in clientsList & storage
+      if (currentUser?.email) {
+        const storageKey = `gt_clients_${currentUser.email}`;
+        const existingClients = storageService.getSync<any[]>(storageKey, []) || [];
+        const updatedClients = existingClients.map(c => {
+          if (c.name && c.name.toLowerCase().includes(cleanQuery)) {
+            return { ...c, balanceUsd: 0 };
+          }
+          return c;
+        });
+        storageService.set(storageKey, updatedClients);
+        setClientsList(updatedClients);
+      }
+
+      showToast(`Solvencia concedida a "${clientName}". Se saldaron ${settledCount} deuda(s) por $${totalAmountSettled.toFixed(2)}.`);
+      handleAddAuditLog(
+        'Otorgar solvencia',
+        `Solvencia otorgada a "${clientName}": ${settledCount} deudas saldadas por $${totalAmountSettled.toFixed(2)} USD`,
+        'deudas'
+      );
+
+      if (currentUser?.uid) {
+        updatedDebts.filter(d => d.debtorName?.toLowerCase().includes(cleanQuery)).forEach(d => {
+          backgroundSyncEngine.scheduleSync(currentUser.uid, {
+            collection: 'debts',
+            action: 'upsert',
+            docId: d.id,
+            payload: d
+          });
+        });
+      }
+    } else {
+      showToast(`"${clientName}" ya se encuentra solvente o no tiene deudas pendientes.`);
+    }
+
+    return { settledCount, totalAmount: totalAmountSettled };
+  }, [debts, currentUser, saveDebts, handleAddAuditLog]);
 
   // --- 7. ADMIN FUNCTIONS EXECUTED BY LUIS ---
 
@@ -1825,6 +2083,7 @@ export default function App() {
             proFeaturesConfig={proFeaturesConfig}
             isOnline={isOnline}
             isCloudActive={isCloudSyncActive}
+            onOpenVoiceAssistant={() => setIsVoiceAssistantOpen(true)}
           />
         );
       case 'balance':
@@ -1832,6 +2091,7 @@ export default function App() {
           <TabBalance
             records={records}
             inventory={inventory}
+            debts={debts}
             onDeleteRecord={handleDeleteRecord}
             onOpenSale={() => setIsSaleOpen(true)}
             onOpenExpense={() => setIsExpenseOpen(true)}
@@ -1860,6 +2120,9 @@ export default function App() {
           <TabInventario
             inventory={inventory}
             records={records}
+            debts={debts}
+            clients={clientsList}
+            companyName={currentUser?.companyName || currentUser?.name || 'Finova Comercio'}
             onDeleteRecord={handleDeleteRecord}
             onAddProduct={handleAddProduct}
             onDeleteProduct={handleDeleteProduct}
@@ -1887,12 +2150,14 @@ export default function App() {
             onDeleteDebt={handleDeleteDebt}
             onToggleDebtPaid={handleToggleDebtCheck}
             onApplyPayment={handleApplyDebtPayment}
+            onApplyClientPayment={handleApplyClientPayment}
             onUpdateDebt={handleUpdateDebt}
             rates={exchangeRates}
             onOpenSale={() => setIsSaleOpen(true)}
             selectedCurrency={selectedCurrency}
             userEmail={currentUser?.email}
             companyName={currentUser?.companyName || 'Finova Comercio'}
+            clients={clientsList}
           />
         );
       case 'clientes':
@@ -1903,6 +2168,11 @@ export default function App() {
           <SuggestedClients
             userEmail={currentUser.email}
             rates={exchangeRates}
+            selectedCurrency={selectedCurrency}
+            debts={debts}
+            onAddDebt={handleAddDebt}
+            onApplyPayment={handleApplyDebtPayment}
+            onApplyClientPayment={handleApplyClientPayment}
             onAddRecord={handleAddNewRecord}
             onClose={() => setActiveTab('inicio')}
           />
@@ -2650,6 +2920,34 @@ export default function App() {
 
       {/* Floating PWA Install Prompt */}
       <FloatingInstallPrompt />
+
+      {/* Finova AI Assistant Modal (Google Gemini interface design) */}
+      <VoiceAssistantModal
+        isOpen={isVoiceAssistantOpen}
+        onClose={() => setIsVoiceAssistantOpen(false)}
+        todaySales={assistantTodaySales}
+        todayExpenses={assistantTodayExpenses}
+        todayBalance={assistantTodayBalance}
+        totalInventoryValue={assistantTotalInventoryValue}
+        currency={selectedCurrency}
+        rates={exchangeRates}
+        inventory={inventory}
+        debts={debts}
+        records={records}
+        clients={clientsList}
+        companyName={currentUser?.companyName || currentUser?.name || 'Mi Negocio'}
+        userName={currentUser?.name || 'Usuario'}
+        onAddNewRecord={handleAddNewRecord}
+        onAddNewDebt={handleAddDebt}
+        onAddNewClient={handleAddNewClient}
+        onDeleteClient={handleDeleteClient}
+        onDeleteRecord={handleDeleteRecord}
+        onDeleteDebt={handleDeleteDebt}
+        onSettleClientDebts={handleSettleClientDebts}
+        onAddInventoryProduct={handleAddProduct}
+        onDeleteInventoryProduct={handleDeleteProduct}
+        onUpdateInventoryStock={handleUpdateProductStock}
+      />
 
     </div>
   );

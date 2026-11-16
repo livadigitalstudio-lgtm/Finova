@@ -16,6 +16,9 @@ export interface DebtFlowModalProps {
   initialCurrency?: 'USD' | 'EUR';
   initialType?: 'por_cobrar' | 'por_pagar';
   currentUserEmail?: string;
+  preselectedDebtorName?: string;
+  preselectedClientPhone?: string;
+  existingDebts?: DebtItem[];
 }
 
 interface QuickContact {
@@ -31,7 +34,10 @@ export default function DebtFlowModal({
   rates,
   initialCurrency = 'USD',
   initialType = 'por_cobrar',
-  currentUserEmail
+  currentUserEmail,
+  preselectedDebtorName = '',
+  preselectedClientPhone = '',
+  existingDebts = []
 }: DebtFlowModalProps) {
   // 1. Debt Type (Por cobrar vs Por pagar)
   const [debtType, setDebtType] = useState<'por_cobrar' | 'por_pagar'>(initialType);
@@ -116,7 +122,7 @@ export default function DebtFlowModal({
       setRateType('bcv');
       setCustomRateInput('');
       setAmountStr('');
-      setPersonName('');
+      setPersonName(preselectedDebtorName || '');
       setConcept('');
       setRegistrationDate(getLocalDateString());
       setIsEditingRegDate(false);
@@ -125,12 +131,12 @@ export default function DebtFlowModal({
       setIsContactSheetOpen(false);
       setContactSearch('');
       setNewContactInput('');
-      setClientPhone('');
+      setClientPhone(preselectedClientPhone || '');
       setClientIdNumber('');
     } else if (!isOpen) {
       wasOpenRef.current = false;
     }
-  }, [isOpen, initialCurrency, initialType]);
+  }, [isOpen, initialCurrency, initialType, preselectedDebtorName, preselectedClientPhone]);
 
   // Calculations
   const numericAmount = parseFloat(amountStr.replace(',', '.')) || 0;
@@ -602,6 +608,35 @@ export default function DebtFlowModal({
                 />
               </div>
             )}
+
+            {/* Consolidated Account Alert Banner if client already owes money */}
+            {(() => {
+              if (!personName.trim()) return null;
+              const clean = personName.trim().toLowerCase();
+              const clientPending = existingDebts.filter(d => 
+                d.status === 'pendiente' && 
+                d.type === debtType && 
+                d.debtorName && 
+                d.debtorName.trim().toLowerCase() === clean
+              );
+              if (clientPending.length === 0) return null;
+              const prevOwed = clientPending.reduce((sum, d) => sum + (d.remainingAmount ?? d.amount ?? 0), 0);
+              const willOweTotal = prevOwed + numericAmount;
+
+              return (
+                <div className="bg-amber-50 border border-amber-200/80 rounded-xl p-2.5 text-xs text-amber-900 flex items-start gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-extrabold block">
+                      Cuenta consolidada de {personName}:
+                    </span>
+                    <span className="text-[11px] text-amber-800">
+                      Este cliente ya debe <strong>${prevOwed.toFixed(2)}</strong> ({clientPending.length} nota{clientPending.length > 1 ? 's' : ''}). Esta nueva deuda se sumará automáticamente a su saldo consolidado (Nuevo total: <strong>${willOweTotal.toFixed(2)}</strong>).
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Quick chips of recent contacts */}
             {activeContactList.length > 0 && (

@@ -4,10 +4,10 @@ import {
   Trash2, FileText, Download, TrendingUp, Search, 
   ChevronLeft, ChevronRight, X, Plus, Minus, Check, 
   Clock, DollarSign, Wallet, CalendarDays, RefreshCw, Package,
-  AlertTriangle
+  AlertTriangle, Sparkles, TrendingDown, HelpCircle, PieChart
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { FinancialRecord, ExchangeRates, InventoryItem } from '../types';
+import { FinancialRecord, ExchangeRates, InventoryItem, DebtItem } from '../types';
 import { formatMoney, CurrencyCode, formatRecordDisplay, getRecordAmountInCurrency } from '../utils/currency';
 import { 
   getLocalDateString, 
@@ -21,6 +21,7 @@ import {
 interface TabBalanceProps {
   records: FinancialRecord[];
   inventory?: InventoryItem[];
+  debts?: DebtItem[];
   onDeleteRecord: (id: string, options?: { revertInventory?: boolean }) => void;
   onOpenSale: () => void;
   onOpenExpense: () => void;
@@ -32,6 +33,7 @@ interface TabBalanceProps {
 export default function TabBalance({
   records = [],
   inventory = [],
+  debts = [],
   onDeleteRecord,
   onOpenSale,
   onOpenExpense,
@@ -287,6 +289,127 @@ export default function TabBalance({
   const netMoney = useMemo(() => formatMoney(netBalance, selectedCurrency, rates), [netBalance, selectedCurrency, rates]);
   const ingresoMoney = useMemo(() => formatMoney(totalIngreso, selectedCurrency, rates), [totalIngreso, selectedCurrency, rates]);
   const egresoMoney = useMemo(() => formatMoney(totalEgreso, selectedCurrency, rates), [totalEgreso, selectedCurrency, rates]);
+
+  // Pending accounts receivable (money yet to be collected from customers)
+  const pendingReceivablesInTarget = useMemo(() => {
+    return (debts || [])
+      .filter(d => d.type === 'por_cobrar' && d.status === 'pendiente')
+      .reduce((sum, item) => {
+        const remaining = (item.amount || 0) - ((item.payments || []).reduce((pSum, p) => pSum + (p.amount || 0), 0));
+        if (remaining <= 0) return sum;
+        return sum + getRecordAmountInCurrency({ ...item, amount: remaining }, selectedCurrency, rates);
+      }, 0);
+  }, [debts, selectedCurrency, rates]);
+
+  const pendingMoneyReceivables = useMemo(() => {
+    return formatMoney(pendingReceivablesInTarget, selectedCurrency, rates);
+  }, [pendingReceivablesInTarget, selectedCurrency, rates]);
+
+  const projectedTotalMoney = useMemo(() => {
+    return formatMoney(netBalance + pendingReceivablesInTarget, selectedCurrency, rates);
+  }, [netBalance, pendingReceivablesInTarget, selectedCurrency, rates]);
+
+  // --- DIDACTIC MONTH-OVER-MONTH COMPARATIVE METRICS ---
+  const didacticMonthComparison = useMemo(() => {
+    // Current selected month
+    const curMonthRecords = records.filter(r => {
+      if (!r?.date) return false;
+      const { year, month } = parseDateSafe(r.date);
+      return year === selectedYear && month === selectedMonth;
+    });
+
+    let curIng = 0;
+    let curEg = 0;
+    let curSalesCount = 0;
+    let curItemsSold = 0;
+    let curItemsCost = 0;
+
+    curMonthRecords.forEach(r => {
+      const amt = getRecordAmountInCurrency(r, selectedCurrency, rates);
+      if (r.type === 'ingreso') {
+        curIng += amt;
+        curSalesCount += 1;
+        if (r.soldItems && r.soldItems.length > 0) {
+          r.soldItems.forEach(item => {
+            curItemsSold += item.quantity || 1;
+            const invProd = (inventory || []).find(p => p.id === item.productId);
+            const unitCost = invProd?.cost || ((item.unitPrice || 0) * 0.7);
+            curItemsCost += unitCost * (item.quantity || 1);
+          });
+        }
+      } else if (r.type === 'egreso') {
+        curEg += amt;
+      }
+    });
+
+    // Previous month calculation
+    const prevMonthNumber = selectedMonth === 1 ? 12 : selectedMonth - 1;
+    const prevMonthYear = selectedMonth === 1 ? selectedYear - 1 : selectedYear;
+
+    const prevMonthRecords = records.filter(r => {
+      if (!r?.date) return false;
+      const { year, month } = parseDateSafe(r.date);
+      return year === prevMonthYear && month === prevMonthNumber;
+    });
+
+    let prevIng = 0;
+    let prevEg = 0;
+    let prevSalesCount = 0;
+
+    prevMonthRecords.forEach(r => {
+      const amt = getRecordAmountInCurrency(r, selectedCurrency, rates);
+      if (r.type === 'ingreso') {
+        prevIng += amt;
+        prevSalesCount += 1;
+      } else if (r.type === 'egreso') {
+        prevEg += amt;
+      }
+    });
+
+    const curNet = curIng - curEg;
+    const prevNet = prevIng - prevEg;
+
+    // Percentage Deltas
+    const deltaIngPct = prevIng > 0 
+      ? Number((((curIng - prevIng) / prevIng) * 100).toFixed(1))
+      : (curIng > 0 ? 100 : 0);
+
+    const deltaEgPct = prevEg > 0 
+      ? Number((((curEg - prevEg) / prevEg) * 100).toFixed(1))
+      : (curEg > 0 ? 100 : 0);
+
+    const deltaNetPct = prevNet !== 0 
+      ? Number((((curNet - prevNet) / Math.abs(prevNet)) * 100).toFixed(1))
+      : (curNet > 0 ? 100 : 0);
+
+    const profitMarginPct = curIng > 0 ? Number(((curNet / curIng) * 100).toFixed(1)) : 0;
+    const expenseRatioPct = curIng > 0 ? Number(((curEg / curIng) * 100).toFixed(1)) : 0;
+
+    const curMonthName = MONTH_NAMES_ES[selectedMonth - 1];
+    const prevMonthName = MONTH_NAMES_ES[prevMonthNumber - 1];
+
+    return {
+      curMonthName,
+      prevMonthName,
+      curYear: selectedYear,
+      prevYear: prevMonthYear,
+      curIng,
+      prevIng,
+      curEg,
+      prevEg,
+      curNet,
+      prevNet,
+      curSalesCount,
+      prevSalesCount,
+      curItemsSold,
+      curItemsCost,
+      deltaIngPct,
+      deltaEgPct,
+      deltaNetPct,
+      profitMarginPct,
+      expenseRatioPct
+    };
+  }, [records, selectedYear, selectedMonth, selectedCurrency, rates, inventory]);
 
   // Active sub-tab records
   const tabRecords = useMemo(() => {
@@ -674,6 +797,69 @@ export default function TabBalance({
           </div>
         </div>
 
+        {/* 2b. SPECIALIZED BREAKDOWN: "Lo que se tiene", "Lo que se ha cobrado", "Falta por cobrar (descontado)" */}
+        <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/80 space-y-2.5">
+          <div className="flex items-center justify-between border-b border-slate-200/50 pb-1.5">
+            <span className="text-[11px] font-black text-slate-800 flex items-center gap-1.5 uppercase tracking-wide">
+              <Wallet className="w-3.5 h-3.5 text-amber-500" />
+              <span>Caja Real vs Dinero por Cobrar</span>
+            </span>
+            <span className="text-[9.5px] font-extrabold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full">
+              Control Transparente
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {/* 1. Lo que se tiene */}
+            <div className="bg-white p-2.5 rounded-xl border border-slate-200/80 shadow-2xs">
+              <span className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider">
+                Lo que se tiene (En Caja)
+              </span>
+              <p className="text-sm sm:text-base font-black text-slate-900 mt-0.5">
+                {netMoney.primary}
+              </p>
+              <span className="text-[9px] font-bold text-emerald-600 block mt-0.5">
+                ✓ Disponible para hacer vida
+              </span>
+            </div>
+
+            {/* 2. Lo que se ha cobrado */}
+            <div className="bg-white p-2.5 rounded-xl border border-slate-200/80 shadow-2xs">
+              <span className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider">
+                Lo que se ha cobrado
+              </span>
+              <p className="text-sm sm:text-base font-black text-emerald-600 mt-0.5">
+                {ingresoMoney.primary}
+              </p>
+              <span className="text-[9px] font-semibold text-slate-500 block mt-0.5">
+                Ventas e ingresos cobrados
+              </span>
+            </div>
+
+            {/* 3. Lo que falta por cobrar */}
+            <div className="bg-white p-2.5 rounded-xl border border-amber-300/80 shadow-2xs bg-gradient-to-b from-amber-50/30 to-white">
+              <span className="text-[10px] font-bold text-amber-800 block uppercase tracking-wider flex items-center justify-between">
+                <span>Falta por cobrar</span>
+                <span className="text-[8.5px] bg-amber-200/70 text-amber-900 px-1 py-0.2 rounded font-extrabold">Pendiente</span>
+              </span>
+              <p className="text-sm sm:text-base font-black text-amber-700 mt-0.5">
+                {pendingMoneyReceivables.primary}
+              </p>
+              <span className="text-[9px] font-bold text-amber-800 block mt-0.5">
+                ⚠ Descontado • Aún no cobrado
+              </span>
+            </div>
+          </div>
+
+          {/* Total proyectado */}
+          <div className="flex items-center justify-between px-1 text-[11px] text-slate-600 pt-1 border-t border-slate-200/40">
+            <span className="font-medium">Total proyectado (Caja + Por cobrar):</span>
+            <span className="font-extrabold text-slate-900 font-sans">
+              {projectedTotalMoney.primary} <span className="text-[10px] font-mono text-slate-400 font-normal">({projectedTotalMoney.bolivares})</span>
+            </span>
+          </div>
+        </div>
+
         {/* Action links row */}
         <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs font-bold">
           <button
@@ -695,6 +881,115 @@ export default function TabBalance({
               <ChevronRight className="w-3.5 h-3.5" />
             </button>
           )}
+        </div>
+      </div>
+
+      {/* 2c. PANEL DIDÁCTICO Y COMPARATIVA MES A MES */}
+      <div className="bg-white rounded-3xl border border-slate-200/80 p-4 sm:p-5 shadow-xs space-y-3.5">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center font-bold">
+              <Sparkles className="w-4 h-4 text-indigo-600" />
+            </div>
+            <div>
+              <h4 className="text-xs sm:text-sm font-black text-slate-900 tracking-tight flex items-center gap-1.5">
+                <span>Análisis Didáctico: {didacticMonthComparison.curMonthName} vs {didacticMonthComparison.prevMonthName}</span>
+              </h4>
+              <p className="text-[10.5px] text-slate-400">
+                Comparativa mensual, rentabilidad de mercancía y balance exacto
+              </p>
+            </div>
+          </div>
+          <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-200/60">
+            {didacticMonthComparison.curYear}
+          </span>
+        </div>
+
+        {/* 3 Didactic Metric Columns */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+          {/* 1. Ingresos Mes vs Mes */}
+          <div className="bg-slate-50/80 p-3 rounded-2xl border border-slate-200/70 space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Ventas / Ingresos
+              </span>
+              <span className={`text-[10px] font-black px-1.5 py-0.5 rounded flex items-center gap-0.5 ${
+                didacticMonthComparison.deltaIngPct >= 0 
+                  ? 'bg-emerald-100 text-emerald-800' 
+                  : 'bg-rose-100 text-rose-800'
+              }`}>
+                {didacticMonthComparison.deltaIngPct >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                <span>{didacticMonthComparison.deltaIngPct >= 0 ? '+' : ''}{didacticMonthComparison.deltaIngPct}%</span>
+              </span>
+            </div>
+            <div className="text-base font-black text-slate-900 font-sans">
+              ${didacticMonthComparison.curIng.toFixed(2)}
+            </div>
+            <div className="text-[10px] text-slate-400 font-medium">
+              Mes anterior: ${didacticMonthComparison.prevIng.toFixed(2)} ({didacticMonthComparison.prevMonthName})
+            </div>
+          </div>
+
+          {/* 2. Egresos Mes vs Mes */}
+          <div className="bg-slate-50/80 p-3 rounded-2xl border border-slate-200/70 space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Gastos / Egresos
+              </span>
+              <span className={`text-[10px] font-black px-1.5 py-0.5 rounded flex items-center gap-0.5 ${
+                didacticMonthComparison.deltaEgPct <= 0 
+                  ? 'bg-emerald-100 text-emerald-800' 
+                  : 'bg-amber-100 text-amber-900'
+              }`}>
+                <span>{didacticMonthComparison.deltaEgPct >= 0 ? '+' : ''}{didacticMonthComparison.deltaEgPct}%</span>
+              </span>
+            </div>
+            <div className="text-base font-black text-rose-600 font-sans">
+              ${didacticMonthComparison.curEg.toFixed(2)}
+            </div>
+            <div className="text-[10px] text-slate-400 font-medium">
+              Representa el {didacticMonthComparison.expenseRatioPct}% de los ingresos
+            </div>
+          </div>
+
+          {/* 3. Ganancia Neta y Rendimiento */}
+          <div className="bg-slate-50/80 p-3 rounded-2xl border border-slate-200/70 space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                Ganancia Neta Real
+              </span>
+              <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800">
+                Margen {didacticMonthComparison.profitMarginPct}%
+              </span>
+            </div>
+            <div className={`text-base font-black font-sans ${
+              didacticMonthComparison.curNet >= 0 ? 'text-emerald-600' : 'text-rose-600'
+            }`}>
+              ${didacticMonthComparison.curNet.toFixed(2)}
+            </div>
+            <div className="text-[10px] text-slate-400 font-medium">
+              Mes anterior: ${didacticMonthComparison.prevNet.toFixed(2)}
+            </div>
+          </div>
+        </div>
+
+        {/* Didactic explanation message card */}
+        <div className="bg-gradient-to-r from-indigo-50/80 via-sky-50/60 to-emerald-50/50 p-3 rounded-2xl border border-indigo-100/80 text-xs text-slate-700 space-y-1.5">
+          <div className="font-extrabold text-indigo-950 flex items-center gap-1.5">
+            <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+            <span>Explicación didáctica de tus cuentas de {didacticMonthComparison.curMonthName}:</span>
+          </div>
+          <p className="text-[11px] leading-relaxed text-slate-600">
+            {didacticMonthComparison.curIng === 0 && didacticMonthComparison.curEg === 0 ? (
+              'Aún no hay registros en este mes. A medida que anotes ventas y gastos, Finova te mostrará la comparativa didáctica exacta contra el mes anterior.'
+            ) : (
+              <>
+                En <strong>{didacticMonthComparison.curMonthName}</strong> tu negocio generó <strong>${didacticMonthComparison.curIng.toFixed(2)}</strong> en ventas ({didacticMonthComparison.curSalesCount} operaciones) frente a <strong>${didacticMonthComparison.prevIng.toFixed(2)}</strong> en {didacticMonthComparison.prevMonthName} ({didacticMonthComparison.deltaIngPct >= 0 ? `un incremento del +${didacticMonthComparison.deltaIngPct}%` : `una reducción del ${didacticMonthComparison.deltaIngPct}%`}).
+                {didacticMonthComparison.curItemsSold > 0 && ` Has comercializado ${didacticMonthComparison.curItemsSold} unidades de mercancía con costo estimado de $${didacticMonthComparison.curItemsCost.toFixed(2)}.`}
+                {' '}Tus gastos operativos sumaron <strong>${didacticMonthComparison.curEg.toFixed(2)}</strong>, dejándote una ganancia neta en mano de <strong>${didacticMonthComparison.curNet.toFixed(2)}</strong> (Margen del {didacticMonthComparison.profitMarginPct}%).
+              </>
+            )}
+          </p>
         </div>
       </div>
 
